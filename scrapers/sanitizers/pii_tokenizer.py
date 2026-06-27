@@ -16,11 +16,19 @@ CONTRATO DE CAMPOS (no malinterpretar):
 from __future__ import annotations
 
 import os
+import re
+from collections.abc import Mapping
+from typing import Any
 
 from shared.hashing import hmac_hex
 
 
 HMAC_PREFIX = "hmac_sha256:"
+DEFAULT_EXPORT_SALT_ENV = "PII_SALT"
+
+_DIGITS_RE = re.compile(r"\D+")
+_CEDULA_INPUT_KEYS = ("cedula", "cédula", "identity_document", "documento_identidad")
+_TELEFONO_INPUT_KEYS = ("telefono", "teléfono", "phone", "mobile", "celular")
 
 
 def hmac_token(value: str, secret_env: str = "PII_HMAC_SECRET") -> str:
@@ -48,3 +56,73 @@ def hmac_digest(value: str, secret_env: str = "PII_HMAC_SECRET") -> str:
     VARCHAR(64)). Equivale a `shared.hashing.identity_token(value, secret)`.
     """
     return hmac_token(value, secret_env=secret_env).removeprefix(HMAC_PREFIX)
+
+
+def _required_salt(secret_env: str = DEFAULT_EXPORT_SALT_ENV) -> str:
+    salt = os.getenv(secret_env)
+    if not salt:
+        raise RuntimeError(
+            f"Falta variable {secret_env}. Configura un salt para tokenizar PII con HMAC SHA-256."
+        )
+    return salt
+
+
+def _digits_only(value: str) -> str:
+    return _DIGITS_RE.sub("", value)
+
+
+def _masked_last4(value: str) -> str:
+    digits = _digits_only(value)
+    if not digits:
+        raise ValueError("No hay dígitos para generar máscara PII")
+    return f"****{digits[-4:]}"
+
+
+def mask_cedula(cedula: str, salt: str) -> tuple[str, str]:
+    """Devuelve (`cedula_hmac`, `cedula_masked`) sin conservar cédula cruda."""
+    normalized = _digits_only(cedula)
+    digest = hmac_hex(normalized, salt)
+    if digest is None:
+        raise ValueError("No hay dígitos de cédula para tokenizar")
+    return digest, _masked_last4(normalized)
+
+
+def mask_telefono(telefono: str, salt: str) -> tuple[str, str]:
+    """Devuelve (`telefono_hmac`, `telefono_masked`) sin conservar teléfono crudo."""
+    normalized = _digits_only(telefono)
+    digest = hmac_hex(normalized, salt)
+    if digest is None:
+        raise ValueError("No hay dígitos de teléfono para tokenizar")
+    return digest, _masked_last4(normalized)
+
+
+def tokenize_pii_fields(
+    record: Mapping[str, Any],
+    *,
+    secret_env: str = DEFAULT_EXPORT_SALT_ENV,
+) -> dict[str, Any]:
+    """Reemplaza cédulas/teléfonos conocidos por campos HMAC exportables.
+
+    El resultado nunca conserva los campos originales de cédula o teléfono en
+    claro. Campos no PII se copian intactos.
+    """
+    salt = _required_salt(secret_env)
+    sanitized = {
+        key: value
+        for key, value in record.items()
+        if key not in {*_CEDULA_INPUT_KEYS, *_TELEFONO_INPUT_KEYS}
+    }
+
+    cedula = next((record[key] for key in _CEDULA_INPUT_KEYS if key in record and record[key]), None)
+    if cedula is not None:
+        cedula_hmac, cedula_masked = mask_cedula(str(cedula), salt)
+        sanitized["cedula_hmac"] = cedula_hmac
+        sanitized["cedula_masked"] = cedula_masked
+
+    telefono = next((record[key] for key in _TELEFONO_INPUT_KEYS if key in record and record[key]), None)
+    if telefono is not None:
+        telefono_hmac, telefono_masked = mask_telefono(str(telefono), salt)
+        sanitized["telefono_hmac"] = telefono_hmac
+        sanitized["telefono_masked"] = telefono_masked
+
+    return sanitized
