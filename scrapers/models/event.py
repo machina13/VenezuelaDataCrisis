@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+_TRUST_TIERS = {"A", "B", "C", "D"}
+
 
 class Event(BaseModel):
     """Evento / incidente reportado por una fuente."""
@@ -14,6 +16,7 @@ class Event(BaseModel):
     description: str
     location_text: str | None = None
     date_iso: str | None = None
+    trust_tier: str = "D"
     confidence_score: float = 0.0
     fuente: str
     nota: str | None = None
@@ -31,6 +34,14 @@ class Event(BaseModel):
         if isinstance(v, bool):
             raise ValueError("confidence_score must be a number, not a bool")
         return v
+
+    @field_validator("trust_tier", mode="before")
+    @classmethod
+    def _valid_trust_tier(cls, v: object) -> str:
+        tier = str(v or "").strip().upper()
+        if tier not in _TRUST_TIERS:
+            raise ValueError(f"trust_tier must be one of {sorted(_TRUST_TIERS)}")
+        return tier
 
     @field_validator("confidence_score")
     @classmethod

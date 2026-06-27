@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+_TRUST_TIERS = {"A", "B", "C", "D"}
+
 
 class AcopioCenter(BaseModel):
     """Centro de acopio / punto de recursos."""
@@ -13,6 +15,7 @@ class AcopioCenter(BaseModel):
     coordinates: dict | None = None
     needs: list[str] = Field(default_factory=list)
     active: bool = True
+    trust_tier: str = "D"
     fuente: str
     nota: str | None = None
 
@@ -22,6 +25,14 @@ class AcopioCenter(BaseModel):
         if not v or not v.strip():
             raise ValueError("must be a non-empty string")
         return v
+
+    @field_validator("trust_tier", mode="before")
+    @classmethod
+    def _valid_trust_tier(cls, v: object) -> str:
+        tier = str(v or "").strip().upper()
+        if tier not in _TRUST_TIERS:
+            raise ValueError(f"trust_tier must be one of {sorted(_TRUST_TIERS)}")
+        return tier
 
     @field_validator("coordinates")
     @classmethod

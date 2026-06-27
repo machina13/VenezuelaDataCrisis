@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, field_validator
 
 _PERSON_STATUS = {"desaparecido", "encontrado", "fallecido"}
+_TRUST_TIERS = {"A", "B", "C", "D"}
 
 
 class Person(BaseModel):
@@ -17,6 +18,7 @@ class Person(BaseModel):
     last_known_location: str | None = None
     status: str = "desaparecido"
     verification_status: str = "unverified"
+    trust_tier: str = "D"
     confidence_score: float = 0.0
     nota: str | None = None
     foto: str | None = None
@@ -35,6 +37,14 @@ class Person(BaseModel):
         if v not in _PERSON_STATUS:
             raise ValueError(f"status must be one of {sorted(_PERSON_STATUS)}")
         return v
+
+    @field_validator("trust_tier", mode="before")
+    @classmethod
+    def _valid_trust_tier(cls, v: object) -> str:
+        tier = str(v or "").strip().upper()
+        if tier not in _TRUST_TIERS:
+            raise ValueError(f"trust_tier must be one of {sorted(_TRUST_TIERS)}")
+        return tier
 
     @field_validator("confidence_score", mode="before")
     @classmethod

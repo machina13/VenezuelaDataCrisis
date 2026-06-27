@@ -16,6 +16,7 @@ def test_person_valid_and_defaults():
     p = Person(full_name="Juan Perez", fuente="encuentralos")
     assert p.status == "desaparecido"
     assert p.verification_status == "unverified"
+    assert p.trust_tier == "D"
     assert p.confidence_score == 0.0
     assert p.cedula_hmac is None
     assert p.foto is None
@@ -33,6 +34,8 @@ def test_person_rejects_bad_score_status_and_extra():
         Person(full_name="A", fuente="s", status="zombie")
     with pytest.raises(ValidationError):
         Person(full_name="A", fuente="s", unknown_field="x")  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        Person(full_name="A", fuente="s", trust_tier="Z")
 
 
 def test_person_rejects_bool_confidence_score():
@@ -70,6 +73,7 @@ def test_acopio_center_valid_and_defaults():
     assert c.active is True
     assert c.needs == []
     assert c.coordinates is None
+    assert c.trust_tier == "D"
 
 
 def test_acopio_center_coordinates():
@@ -104,6 +108,7 @@ def test_event_valid_and_date_iso_validation():
         date_iso="2026-06-27T15:00:00Z",
     )
     assert e.location_text is None
+    assert e.trust_tier == "D"
     assert e.confidence_score == 0.0
     with pytest.raises(ValidationError):
         Event(event_type="x", description="y", fuente="s", date_iso="not-a-date")
@@ -124,6 +129,7 @@ def test_serialization_round_trip():
         "last_known_location",
         "status",
         "verification_status",
+        "trust_tier",
         "confidence_score",
         "nota",
         "foto",
