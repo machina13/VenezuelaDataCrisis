@@ -1,0 +1,166 @@
+digraph VZLA_DEDUP {
+    graph [
+        rankdir=LR
+        fontname="Helvetica"
+        fontsize=12
+        bgcolor="#f8f9fa"
+        pad=0.5
+        splines=ortho
+        nodesep=0.4
+        ranksep=0.9
+    ]
+    node [
+        shape=box
+        style="rounded,filled"
+        fontname="Helvetica"
+        fontsize=11
+        margin="0.2,0.12"
+    ]
+    edge [
+        color="#555555"
+        arrowsize=0.8
+        penwidth=1.2
+    ]
+
+    // ── Nodos ───────────────────────────────────────────────────────
+
+    subgraph cluster_config {
+        label="config"
+        style="rounded,filled"
+        color="#0075ca"
+        fillcolor="#daeeff"
+        fontname="Helvetica Bold"
+        fontsize=10
+        fontcolor="#0075ca"
+
+        n4 [label="#4\nEsquema YAML/JSON"  fillcolor="#0075ca" fontcolor="white"]
+    }
+
+    subgraph cluster_models {
+        label="models"
+        style="rounded,filled"
+        color="#b8a800"
+        fillcolor="#fafac0"
+        fontname="Helvetica Bold"
+        fontsize=10
+        fontcolor="#7a7000"
+
+        n5 [label="#5\nModelos Pydantic"   fillcolor="#e4e669" fontcolor="black"]
+    }
+
+    subgraph cluster_adapter {
+        label="adapter"
+        style="rounded,filled"
+        color="#d93f0b"
+        fillcolor="#fde8e0"
+        fontname="Helvetica Bold"
+        fontsize=10
+        fontcolor="#d93f0b"
+
+        n10 [label="#10\nInterfaz Adapters"  fillcolor="#d93f0b" fontcolor="white"]
+        n6  [label="#6\nAdapter HTML"        fillcolor="#d93f0b" fontcolor="white"]
+        n7  [label="#7\nAdapter Playwright"  fillcolor="#d93f0b" fontcolor="white"]
+        n8  [label="#8\nAdapter API REST"    fillcolor="#d93f0b" fontcolor="white"]
+        n9  [label="#9\nAdapter PDF"         fillcolor="#d93f0b" fontcolor="white"]
+    }
+
+    subgraph cluster_parser {
+        label="parser"
+        style="rounded,filled"
+        color="#0e8a16"
+        fillcolor="#d4f5d7"
+        fontname="Helvetica Bold"
+        fontsize=10
+        fontcolor="#0e8a16"
+
+        n11 [label="#11\nInterfaz Parsers"   fillcolor="#0e8a16" fontcolor="white"]
+    }
+
+    subgraph cluster_pii {
+        label="pii"
+        style="rounded,filled"
+        color="#b60205"
+        fillcolor="#fde0e0"
+        fontname="Helvetica Bold"
+        fontsize=10
+        fontcolor="#b60205"
+
+        n12 [label="#12\nPII HMAC"           fillcolor="#b60205" fontcolor="white"]
+    }
+
+    subgraph cluster_norm {
+        label="normalización"
+        style="rounded,filled"
+        color="#5319e7"
+        fillcolor="#ede0ff"
+        fontname="Helvetica Bold"
+        fontsize=10
+        fontcolor="#5319e7"
+
+        n13 [label="#13\nNorm. texto"        fillcolor="#5319e7" fontcolor="white"]
+        n14 [label="#14\nNorm. fechas"       fillcolor="#5319e7" fontcolor="white"]
+        n15 [label="#15\nNorm. ubicaciones"  fillcolor="#5319e7" fontcolor="white"]
+        n16 [label="#16\nNLP spaCy"          fillcolor="#5319e7" fontcolor="white"]
+    }
+
+    subgraph cluster_dedup {
+        label="deduplicación"
+        style="rounded,filled"
+        color="#c7a59e"
+        fillcolor="#fdf0ed"
+        fontname="Helvetica Bold"
+        fontsize=10
+        fontcolor="#8a5a50"
+
+        n17 [label="#17\nDedup fingerprint"  fillcolor="#f9d0c4" fontcolor="black"]
+        n18 [label="#18\nBlocking fonético"  fillcolor="#f9d0c4" fontcolor="black"]
+        n19 [label="#19\nSimilarity scoring" fillcolor="#f9d0c4" fontcolor="black"]
+        n20 [label="#20\nClustering duplic." fillcolor="#f9d0c4" fontcolor="black"]
+    }
+
+    subgraph cluster_val {
+        label="validación"
+        style="rounded,filled"
+        color="#6dacc7"
+        fillcolor="#eaf4fb"
+        fontname="Helvetica Bold"
+        fontsize=10
+        fontcolor="#2a6a8a"
+
+        n21 [label="#21\nconfidence_score"   fillcolor="#c5def5" fontcolor="black"]
+    }
+
+    // ── Aristas ─────────────────────────────────────────────────────
+
+    // config → adapter, dedup, validación
+    n4 -> n10
+    n4 -> n17
+    n4 -> n21
+
+    // models → parser, pii, dedup, validación
+    n5 -> n11
+    n5 -> n12
+    n5 -> n17
+    n5 -> n18
+    n5 -> n21
+
+    // interfaz adapters → adapters concretos + parsers
+    n10 -> n6
+    n10 -> n7
+    n10 -> n8
+    n10 -> n9
+    n10 -> n11
+
+    // normalización
+    n13 -> n16
+    n13 -> n19
+    n15 -> n19
+
+    // pii → similarity
+    n12 -> n19
+
+    // dedup pipeline
+    n18 -> n19
+    n18 -> n20
+    n19 -> n20
+}

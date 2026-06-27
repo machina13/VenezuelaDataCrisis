@@ -40,6 +40,16 @@ Este proyecto ataca esas preguntas en 6 etapas:
 
 ---
 
+## Mapa de dependencias
+
+El siguiente diagrama muestra las dependencias entre los issues activos del proyecto. Úsalo como referencia para entender qué bloquea qué antes de empezar a trabajar.
+
+![Mapa de dependencias de issues](./docs/issues_graph.svg)
+
+> Fuente editable: [`docs/issues_graph.dot`](./docs/issues_graph.dot) (GraphViz)
+
+---
+
 ## Estado actual
 
 El pipeline de scrapers está operativo con datos. La API y la capa de almacenamiento están en construcción.
