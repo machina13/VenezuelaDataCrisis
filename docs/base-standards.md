@@ -101,6 +101,11 @@ verification_status
 
 This project uses Python.
 
+> Exception (see [`docs/adr/0001`](./adr/0001-arquitectura-serving-publico.md)):
+> the **public serving plane** under `serving/` is written in TypeScript on
+> Cloudflare Workers. This exception is scoped to `serving/` only — the pipeline,
+> the build job and the internal plane remain Python.
+
 Use `pip`.
 
 Do not introduce:
@@ -133,12 +138,17 @@ Avoid hidden global state. Pass dependencies explicitly.
 
 ## 5. Database Standards
 
-This project uses SQLAlchemy as ORM.
+SQLAlchemy is the ORM for the **internal plane** (Supabase / PostgreSQL) and any
+Python database access in the pipeline and build job.
+
+> The **public serving plane** (`serving/`) queries **Cloudflare D1** directly via
+> the Workers binding and is exempt from the SQLAlchemy rule — it never touches
+> PostgreSQL. See [`docs/adr/0001`](./adr/0001-arquitectura-serving-publico.md).
 
 Agents must:
 
-* Use SQLAlchemy for ORM models and normal database access.
-* Not introduce another ORM.
+* Use SQLAlchemy for ORM models and normal database access on the internal plane.
+* Not introduce another ORM on the internal plane.
 * Avoid raw SQL for normal CRUD unless technically justified.
 * Keep database models aligned with `docs/schema.md`.
 
