@@ -48,7 +48,7 @@ El siguiente diagrama muestra el flujo completo de datos: desde las fuentes orig
 
 ![Arquitectura del pipeline](./docs/pipeline.svg)
 
-> Fuente editable: [`docs/pipeline.dot`](./docs/pipeline.dot) (Graphviz)
+> Fuente editable: [`docs/issues/pipeline.dot`](./docs/issues/pipeline.dot) (Graphviz)
 
 ---
 
@@ -190,7 +190,7 @@ El siguiente diagrama muestra las dependencias entre los issues activos del proy
 
 ![Mapa de dependencias de issues](./docs/issues_graph.svg)
 
-> Fuente editable: [`docs/issues_graph.dot`](./docs/issues_graph.dot) (GraphViz)
+> Fuente editable: [`docs/issues/issues_graph.dot`](./docs/issues/issues_graph.dot) (GraphViz)
 
 ---
 
