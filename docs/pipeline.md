@@ -2,58 +2,43 @@
 
 Este documento describe el flujo técnico del pipeline de VZLA_DEDUP.
 
-El objetivo del pipeline es recolectar registros dispersos, convertirlos en entidades tipadas, proteger datos sensibles, normalizar la información, detectar posibles duplicados y exportar archivos JSONL listos para ser ingeridos por DB/API.
-
-El pipeline debe ser modular, trazable y seguro.
+El objetivo es recolectar registros dispersos, convertirlos en entidades tipadas, proteger datos sensibles, normalizarlos y enviarlos a staging en Supabase para que el consolidation job los deduplique y los mueva a las tablas canónicas.
 
 ---
 
-## Resumen del flujo
+## Flujo completo
 
-```text
+```
 Fuentes externas
-    ↓
-Adapters / Fetchers
-    ↓
-Parsers
-    ↓
-Entidades tipadas
-    ↓
-Sanitización PII
-    ↓
-Normalización
-    ↓
-Deduplicación
-    ↓
-Validación técnica
-    ↓
-Export JSONL
-    ↓
-DB/API
-    ↓
-Verification humana / externa
+      ↓
+Adapters (fetch raw)
+      ↓
+Parsers (raw → entidad tipada)
+      ↓
+PII masking (HMAC antes que nada)
+      ↓
+Normalización (texto, fechas, ubicaciones)
+      ↓
+Claves de dedup pre-calculadas (dedup_hash, block_keys)
+      ↓
+┌─────────────────────────────┐     ┌──────────────────────┐
+│  Raw DB (R2 + Supabase)     │     │  Quarantine DB        │
+│  Payload enmascarado,       │ ←── │  Sin parser, PII      │
+│  inmutable, trazable        │     │  no redactable, etc.  │
+└─────────────────────────────┘     └──────────────────────┘
+      ↓
+Staging exporter → POST /api/v1/dedup/* → aportes (Supabase)
+      ↓  consolidation job (cada 20 min)
+Canonical: persons / events / acopio_centers
+      ↓  build job (cada 30 min)
+Cloudflare D1 → Worker → API pública
 ```
 
 ---
 
-## Estado de implementación
+## Capa 1 — Adapters
 
-El orquestador del pipeline está implementado en `scrapers/pipelines/run_pipeline.py`.
-
-### Flujo ejecutable
-
-```text
-SourceConfig (YAML)
-  → adapter (api_json / html_static / manual_file)
-    → parser (encuentralos / fallback genérico)
-      → PII tokenizer (HMAC o strip)
-        → normalización (fechas, ubicaciones)
-          → dedup (Event / AcopioCenter; Person excluido intencionalmente)
-            → confidence_score
-              → JSONL export (persons.jsonl / acopio.jsonl / events.jsonl)
-```
-
-### Adapters implementados
+Cada tipo de fuente tiene un adapter dedicado. El adapter solo hace fetch: devuelve un `RawContent` con el payload crudo y metadatos del request (status HTTP, timestamp, hash del contenido). No interpreta ni transforma nada.
 
 | Tipo | Módulo | Estado |
 |------|--------|--------|
@@ -581,194 +566,77 @@ Debe normalizarse como:
 
 ## Normalización de fechas
 
-Todas las fechas deben exportarse como UTC ISO 8601.
-
-Ejemplo:
-
-```json
-"2026-06-24T17:00:00Z"
-```
-
-Si una fuente trae una fecha sin hora, se debe mantener la fecha con la mejor precisión posible según el contrato acordado.
-
-Si la fecha no puede interpretarse de forma segura, usar `null`.
-
-No inventar horas.
+Helpers compartidos entre adapters (timestamp UTC, hash de contenido, backoff exponencial) viven en `scrapers/adapters/_shared.py`.
 
 ---
 
-## Normalización de ubicaciones
+## Capa 2 — Parsers
 
-Las ubicaciones deben convertirse a un `location_object`.
+Cada fuente tiene un parser específico que implementa `ParserProtocol`. El parser recibe el `RawContent` del adapter y devuelve `list[Person | AcopioCenter | Event]`.
 
-Ejemplo:
+El parser conoce la estructura de su fuente: qué campo es el nombre, qué campo es la cédula, qué valor de status mapea a qué enum.
 
-```json
-{
-  "raw": "El Tocuyo, Lara",
-  "estado": "Lara",
-  "municipio": "Morán",
-  "parroquia": null,
-  "lat": 9.7834,
-  "lng": -69.7921
-}
-```
+**Agregar una fuente nueva = escribir un parser nuevo.** El resto del pipeline no cambia.
 
-### Diccionario de sinónimos de ubicaciones
+| Parser | Módulo | Entidad | Estado |
+|--------|--------|---------|--------|
+| `encuentralos` | `scrapers/parsers/encuentralos_parser.py` | `Person` | ✅ |
 
-Antes de la geocodificación vía OpenStreetMap, el normalizador consulta
-`shared/common/locations.yml`, un diccionario de sinónimos que mapea
-variantes coloquiales, abreviaturas y typos comunes venezolanos a
-nombres canónicos compatibles con OSM.
-
-Ejemplos:
-
-- `"ccs"` → `"Caracas"`
-- `"ptocabello"` → `"Puerto Cabello"`
-- `"maracaivo"` → `"Maracaibo"`
-
-Si una ubicación no está en el diccionario, se usa el texto original.
-El diccionario se carga en memoria una sola vez (lazy-load).
-
-Si la geocodificación falla:
-
-```json
-{
-  "raw": "El Tocuyo, Lara",
-  "estado": "Lara",
-  "municipio": "Morán",
-  "parroquia": null,
-  "lat": null,
-  "lng": null
-}
-```
-
-El registro no debe descartarse porque no tenga coordenadas.
+Si una fuente no tiene parser asignado, sus registros van a **cuarentena** — no al basura, no a un fallback genérico. El FallbackParser fue eliminado.
 
 ---
 
-## Normalización de enums
+## Capa 3 — Limpieza (orden fijo e inamovible)
 
-Los parsers deben mapear valores de cada fuente a enums internos.
+### 3.1 PII — va primero
 
-Ejemplo:
+Cédulas y teléfonos se HMAC antes de cualquier otro procesamiento. El campo original no se guarda en ningún lugar.
 
-```text
-"No localizado" → missing
-"Ubicado"       → found
-"Herido"        → injured
-"Fallecido"     → deceased
-```
+- `cedula_hmac` = `shared/hashing.identity_token(cedula, secret)` → hex puro 64 chars, sin prefijo
+- `cedula_masked` = últimos 4 dígitos con máscara (`V-****5821`)
+- `telefono_contacto` de terceros se descarta explícitamente (familiar que reportó)
 
-Si no se puede mapear con seguridad, usar:
+El secreto viene de `PII_HMAC_SECRET` (env var). Sin él, el pipeline no produce HMAC — los campos quedan `None`. En CI offline esto está aceptado; en producción es obligatorio.
 
-```text
-unknown
-```
+### 3.2 Normalización — va antes de dedup
 
----
+El matching necesita texto uniforme. `"JOSE LUIS"` y `"José Luis"` deben ser el mismo registro antes de comparar.
 
-## 8. Dedup Engine
+- **Texto:** unicode, tildes, mayúsculas, espacios, abreviaciones venezolanas (`ve_abbreviations.json`)
+- **Fechas:** todo a ISO 8601 UTC (`normalize_date`)
+- **Ubicaciones:** nombre normalizado + coordenadas opcionales via OpenStreetMap (`normalize_location`). Si la API falla, `lat/lng = null`; el registro no se descarta
+- **NLP:** para fuentes de texto libre (PDFs, HTML narrativo), `spaCy es_core_news_sm` extrae entidades antes del mapeo
 
-La deduplicación busca detectar registros repetidos.
+### 3.3 Claves de dedup — se calculan aquí, antes de enviar a staging
 
-No todos los tipos de entidad se deduplican igual.
-
----
-
-## Deduplicación de eventos
-
-Para eventos se puede usar fingerprint por contenido normalizado.
-
-Campos posibles:
-
-* `event_type`
-* `occurred_at`
-* `affected_states`
-* `magnitude`
-* `depth_km`
-* `external_ids`
-
-Si dos eventos tienen el mismo `external_id` confiable, pueden tratarse como el mismo evento.
+- `dedup_hash` — SHA-256 del contenido normalizado. Para Event y AcopioCenter, dos registros con el mismo hash son duplicados exactos.
+- `block_keys` — para Person: fonética del nombre (Double Metaphone / NYSIIS) + primeras letras + estado. Permite agrupar candidatos sin comparar todos contra todos.
 
 ---
 
-## Deduplicación de centros de acopio
+## Capa 4 — Staging exporter (Issue #81)
 
-Para centros de acopio se puede usar fingerprint por contenido normalizado.
+Lee las entidades procesadas y hace `POST /api/v1/dedup/*` a `dataVenezuela`.
 
-Campos posibles:
+Responsabilidades del exporter:
+- Convertir `trust_tier` A/B/C/D → 1/2/3 (la BD usa enteros)
+- Enviar primero el Event si la entidad es Person o AcopioCenter (FK obligatoria)
+- Manejar reintentos y backoff en caso de error de red
+- Avanzar el watermark por fuente solo cuando todos los registros de esa fuente llegaron exitosamente
 
-* Nombre normalizado.
-* Ubicación normalizada.
-* Organización responsable.
-* Contacto público.
-* Evento asociado.
-
-Si hay dudas, debe mantenerse como candidato de duplicado y no fusionarse automáticamente.
+El exporter no toma decisiones de dedup. Su única responsabilidad es persistir en staging.
 
 ---
 
-## Deduplicación de personas
+## Capa 5 — Consolidation job (Issue #82)
 
-La deduplicación de personas es sensible.
+Proceso independiente que corre cada 20 minutos. Lee `aportes WHERE consolidated_at IS NULL`.
 
-Un falso merge puede causar daño real.
+**Event y AcopioCenter:** dedup automática por `dedup_hash`. El registro con mayor `trust_tier` gana. La decisión queda en `dedup_decisions`.
 
-Por eso, para personas el sistema no debe colapsar registros automáticamente salvo que exista una regla explícita aprobada por el equipo.
+**Person:** nunca auto-merge. El job calcula similitud (Jaro-Winkler + HMAC match + rango de edad + ubicación) dentro de bloques fonéticos y genera candidatos en `dedup_candidates`. Un voluntario humano aprueba o rechaza. Cada versión anterior queda en `canonical_record_versions`.
 
-El flujo recomendado es:
-
-```text
-Person records limpios
-    ↓
-Blocking
-    ↓
-Similarity scoring
-    ↓
-Dedup candidates
-    ↓
-Revisión humana
-    ↓
-Merge o rechazo
-```
-
----
-
-## Blocking
-
-Blocking reduce el número de comparaciones.
-
-Ejemplos de claves de bloqueo:
-
-* Fonética del nombre.
-* Primeras letras del nombre y apellido.
-* Estado.
-* Municipio.
-* Rango de edad.
-* Evento asociado.
-* Cédula HMAC si existe.
-
-El objetivo es evitar comparar todos contra todos.
-
----
-
-## Similarity scoring
-
-El scoring puede considerar:
-
-* Similitud de nombre.
-* Coincidencia de cédula HMAC.
-* Compatibilidad de edad.
-* Ubicación compatible.
-* Estado reportado.
-* Fuente.
-* Fecha de publicación.
-* Foto, si el sistema lo habilita en el futuro.
-
-El scoring no debe ser interpretado como verdad absoluta.
-
-Debe ser una señal para revisión.
+El job es incremental e idempotente: si se interrumpe, la próxima corrida retoma desde donde quedó sin re-procesar lo ya consolidado.
 
 ---
 
@@ -1134,67 +1002,48 @@ Casos mínimos:
 
 ## 17. Flujo esperado para agregar una nueva fuente
 
-```text
-1. Crear source config.
-2. Crear fixture ficticio.
-3. Crear adapter si no existe uno compatible.
-4. Crear parser específico.
-5. Mapear campos al modelo interno.
-6. Aplicar sanitizer.
-7. Aplicar normalizer.
-8. Validar schema.
-9. Exportar JSONL.
-10. Agregar tests.
-11. Documentar limitaciones.
-12. Abrir PR.
+1. Un error en un registro individual no tumba el pipeline.
+2. Un error en una fuente entera se loguea y se continúa con la siguiente.
+3. Los registros sin parser van a cuarentena, no al basura.
+4. La PII se enmascara antes que cualquier persistencia.
+5. La dedup de personas no es destructiva: propone, un humano decide.
+6. Todo registro mantiene trazabilidad hacia la fuente y el raw artifact.
+7. Los campos desconocidos se exportan como `null`, nunca se omiten.
+8. El staging exporter avanza el watermark solo cuando confirma entrega.
+
+---
+
+## Ejecución local
+
+```bash
+# Tests (deben pasar siempre)
+pytest scrapers/tests
+
+# Demo offline con datos sintéticos
+python -m scrapers.cli run --config scrapers/config/sources.demo.yaml
+
+# Limitar registros por fuente (útil para desarrollo)
+python -m scrapers.cli run --config scrapers/config/sources.demo.yaml --limit 10
+
+# Validar config de fuentes
+python -m scrapers.cli validate --config scrapers/config/sources.demo.yaml
 ```
 
 ---
 
-## 18. Qué no debe hacer un scraper
+## Estado de implementación
 
-Un scraper no debe:
-
-* Confirmar personas como duplicadas.
-* Borrar registros por parecer repetidos.
-* Decidir que una persona está encontrada sin fuente.
-* Inventar edad exacta.
-* Inventar ubicación.
-* Inferir sexo sin evidencia.
-* Loguear PII.
-* Subir outputs reales.
-* Saltarse el sanitizer.
-* Guardar raw content sensible.
-* Consultar fuentes no declaradas.
-* Scrappear fuentes privadas sin autorización.
-
----
-
-## 19. Contratos relacionados
-
-Este documento define el flujo general.
-
-Los detalles específicos viven en:
-
-```text
-docs/source_config.md
-docs/scraper_contract.md
-docs/schema.md
-docs/pii_and_security.md
-docs/deduplication.md
-docs/verification.md
-docs/testing.md
-```
-
----
-
-## Regla de oro
-
-En una crisis, el sistema debe preferir prudencia sobre automatización agresiva.
-
-```text
-Un duplicado se puede revisar.
-Un falso merge puede dañar.
-La trazabilidad no se negocia.
-La PII no se expone.
-```
+| Componente | Estado |
+|-----------|--------|
+| Adapters (todos) | ✅ |
+| `encuentralos` parser | ✅ |
+| PII HMAC (`shared/hashing.py`) | ✅ |
+| Normalización (texto, fechas, ubicaciones, NLP) | ✅ |
+| Modelos Pydantic (Person/AcopioCenter/Event) | ⏳ fix #85 pendiente |
+| Staging exporter | ❌ Issue #81 |
+| Raw artifact store (R2) | ❌ bloqueado por #81 |
+| Quarantine DB | ❌ bloqueado por #81 |
+| Watermark por fuente | ❌ Issue #57, bloqueado por #81 |
+| Consolidation job | ❌ Issue #82, bloqueado por #81 |
+| Build job (Supabase → D1) | ❌ bloqueado por canonical |
+| Cloudflare Worker | ❌ bloqueado por build job |
