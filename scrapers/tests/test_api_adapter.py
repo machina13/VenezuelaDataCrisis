@@ -355,7 +355,7 @@ class TestRetryBackoff:
         adapter = _adapter_with_transport(transport, max_retries=5)
 
         # Parchar time.sleep para no esperar en tests
-        with patch("scrapers.adapters.api_adapter.time.sleep"):
+        with patch("scrapers.adapters.http_policy.time.sleep"):
             pages = list(adapter.fetch_all("/api/personas"))
 
         assert len(pages) == 1
@@ -367,15 +367,15 @@ class TestRetryBackoff:
         transport = _ErrorTransport()
         adapter = _adapter_with_transport(transport, max_retries=3)
 
-        with patch("scrapers.adapters.api_adapter.time.sleep"):
+        with patch("scrapers.adapters.http_policy.time.sleep"):
             with pytest.raises(RuntimeError, match="Máximo de reintentos"):
                 list(adapter.fetch_all("/api/personas"))
 
     def test_backoff_delay_increases(self) -> None:
         """El delay debe aumentar con cada intento (sin jitter, verificar tendencia)."""
-        from scrapers.adapters.api_adapter import _backoff_delay
+        from scrapers.adapters.http_policy import backoff_delay
 
-        delays = [_backoff_delay(i) for i in range(1, 6)]
+        delays = [backoff_delay(i) for i in range(1, 6)]
         # Verificar que la parte determinista crece (sin contar el jitter aleatorio)
         bases = [min(1.0 * (2 ** (i - 1)), 60.0) for i in range(1, 6)]
         assert bases == sorted(bases)   # crece monotónicamente
@@ -486,7 +486,7 @@ class TestNoSleepOnLastAttempt:
         adapter = _adapter_with_transport(transport, max_retries=3)
 
         sleep_calls: list[float] = []
-        with patch("scrapers.adapters.api_adapter.time.sleep", side_effect=sleep_calls.append):
+        with patch("scrapers.adapters.http_policy.time.sleep", side_effect=sleep_calls.append):
             with pytest.raises(RuntimeError):
                 list(adapter.fetch_all("/api/personas"))
 
@@ -504,7 +504,7 @@ class TestNoSleepOnLastAttempt:
         )
 
         sleep_calls: list[float] = []
-        with patch("scrapers.adapters.api_adapter.time.sleep", side_effect=sleep_calls.append):
+        with patch("scrapers.adapters.http_policy.time.sleep", side_effect=sleep_calls.append):
             with pytest.raises(RuntimeError):
                 list(adapter.fetch_all("/api/personas"))
 
