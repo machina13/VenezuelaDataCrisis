@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from scrapers.dedup.fingerprint import build_entity_fingerprint
-from scrapers.models import AcopioCenter, Event
 
 
 DEFAULT_DEDUP_DB_PATH = Path(__file__).resolve().parents[1] / "runtime_output" / "dedup_state.db"
@@ -40,13 +40,13 @@ def _resolve_db_path(db_path: str | Path | None) -> Path:
 
 
 def deduplicate_by_fingerprint(
-    items: list[dict],
+    items: list[dict[str, Any]],
     db_path: str | Path | None = None,
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict[str, Any]], int]:
     database_path = _resolve_db_path(db_path)
     database_path.parent.mkdir(parents=True, exist_ok=True)
 
-    output: list[dict] = []
+    output: list[dict[str, Any]] = []
     duplicates = 0
 
     with sqlite3.connect(database_path) as connection:
@@ -74,9 +74,9 @@ def deduplicate_by_fingerprint(
 
 
 def deduplicate_typed_entities(
-    entities: list[Event | AcopioCenter],
+    entities: list[Any],
     logger: logging.Logger | None = None,
-) -> tuple[list[Event | AcopioCenter], int]:
+) -> tuple[list[Any], int]:
     """Deduplicate typed Event/AcopioCenter records by content fingerprint.
 
     This intentionally excludes Person records because person deduplication is
@@ -86,8 +86,8 @@ def deduplicate_typed_entities(
     model field `fuente`.
     """
     active_logger = logger or _LOGGER
-    output: list[Event | AcopioCenter] = []
-    seen: dict[str, tuple[int, Event | AcopioCenter]] = {}
+    output: list[Any] = []
+    seen: dict[str, tuple[int, Any]] = {}
     duplicates = 0
 
     for entity in entities:
@@ -114,9 +114,9 @@ def deduplicate_typed_entities(
 
 
 def _choose_winner(
-    current: Event | AcopioCenter,
-    candidate: Event | AcopioCenter,
-) -> Event | AcopioCenter:
+    current: Any,
+    candidate: Any,
+) -> Any:
     current_rank = _trust_rank(current)
     candidate_rank = _trust_rank(candidate)
     if candidate_rank > current_rank:
@@ -124,7 +124,7 @@ def _choose_winner(
     return current
 
 
-def _trust_rank(entity: Event | AcopioCenter) -> int:
+def _trust_rank(entity: Any) -> int:
     tier = str(getattr(entity, "trust_tier", "D") or "D").upper()
     return _TIER_RANK.get(tier, _TIER_RANK["D"])
 
@@ -132,8 +132,8 @@ def _trust_rank(entity: Event | AcopioCenter) -> int:
 def _log_discard(
     logger: logging.Logger,
     fingerprint: str,
-    winner: Event | AcopioCenter,
-    loser: Event | AcopioCenter,
+    winner: Any,
+    loser: Any,
 ) -> None:
     logger.info(
         "dedup_discard fingerprint=%s kept_source_id=%s discarded_source_id=%s winning_tier=%s",
@@ -144,7 +144,7 @@ def _log_discard(
     )
 
 
-def _source_id(entity: Event | AcopioCenter) -> str:
+def _source_id(entity: Any) -> str:
     # Los modelos actuales exponen `fuente`; mantenemos compatibilidad futura
     # con `source_id` sin inventar ese campo en el schema tipado.
     return str(getattr(entity, "source_id", None) or getattr(entity, "fuente", "unknown"))
