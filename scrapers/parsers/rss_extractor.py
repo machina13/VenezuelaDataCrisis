@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 
 
 def extract_rss_items(raw: str) -> list[tuple[str | None, str]]:
