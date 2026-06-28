@@ -27,15 +27,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS acopio_centers_dedup_uniq
 
 CREATE TABLE IF NOT EXISTS public.dedup_candidates (
     candidate_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    event_id uuid NOT NULL REFERENCES public.events(event_id),
-    left_person uuid NOT NULL REFERENCES public.persons(person_record_id),
-    right_person uuid NOT NULL REFERENCES public.persons(person_record_id),
-    score numeric(4,3) NOT NULL,
+    event_id varchar(36) NOT NULL REFERENCES public.events(event_id),
+    left_person varchar(36) NOT NULL REFERENCES public.persons(person_record_id),
+    right_person varchar(36) NOT NULL REFERENCES public.persons(person_record_id),
+    score numeric(4,3) NOT NULL CHECK (score >= 0 AND score <= 1),
     reasons jsonb,
     priority text NOT NULL,
     decision text NOT NULL DEFAULT 'pending',
     created_at timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT dedup_candidates_pair_uniq UNIQUE (left_person, right_person)
+    CONSTRAINT dedup_candidates_no_self_match CHECK (left_person <> right_person)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS dedup_candidates_pair_uniq
+    ON public.dedup_candidates (
+        LEAST(left_person, right_person),
+        GREATEST(left_person, right_person)
+    );
 
 COMMIT;

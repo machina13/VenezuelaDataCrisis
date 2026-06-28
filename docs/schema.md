@@ -620,10 +620,10 @@ los hashes aún no estén backfilleados.
 | Campo          | Tipo SQL       | Nullable | Valores / Notas                                      |
 | -------------- | -------------- | -------: | ---------------------------------------------------- |
 | `candidate_id` | `uuid`         |       no | PK, `DEFAULT gen_random_uuid()`                      |
-| `event_id`     | `uuid`         |       no | FK a `public.events(event_id)`                       |
-| `left_person`  | `uuid`         |       no | FK a `public.persons(person_record_id)`              |
-| `right_person` | `uuid`         |       no | FK a `public.persons(person_record_id)`              |
-| `score`        | `numeric(4,3)` |       no | Score de similitud candidato                         |
+| `event_id`     | `VARCHAR(36)`  |       no | FK a `public.events(event_id)`                       |
+| `left_person`  | `VARCHAR(36)`  |       no | FK a `public.persons(person_record_id)`              |
+| `right_person` | `VARCHAR(36)`  |       no | FK a `public.persons(person_record_id)`              |
+| `score`        | `numeric(4,3)` |       no | Score de similitud candidato, `CHECK 0..1`           |
 | `reasons`      | `jsonb`        |       sí | Señales explicables usadas para generar el candidato |
 | `priority`     | `text`         |       no | Prioridad operativa del candidato                    |
 | `decision`     | `text`         |       no | Default `pending`                                    |
@@ -632,8 +632,13 @@ los hashes aún no estén backfilleados.
 Restricción:
 
 ```text
-UNIQUE (left_person, right_person)
+CHECK (left_person <> right_person)
+UNIQUE INDEX dedup_candidates_pair_uniq
+  ON (LEAST(left_person, right_person), GREATEST(left_person, right_person))
 ```
+
+El índice canónico evita insertar el mismo par invertido como dos candidatos
+distintos (`A/B` y `B/A`).
 
 ### Pendiente
 
