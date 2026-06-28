@@ -470,6 +470,39 @@ debe documentarse explícitamente aquí y migrar/recalcular los
 
 ---
 
+## Protección de menores (`is_minor`)
+
+`Person.is_minor` es `bool | None`: `true` si la persona reportada es menor
+de 18 años, `false` si se sabe que es mayor, `None` si no se puede
+determinar (no hay edad reportada).
+
+Solo el valor explícito `true` activa protección — `None`/`false` no
+disparan ninguna reducción, porque ausencia de edad no implica minoría de
+edad.
+
+Cuando `is_minor=true`, antes de exportar a `persons.jsonl`
+(`scrapers.sanitizers.minor_protection.protect_minor_fields`, ejecutado como
+etapa propia del pipeline justo antes del export):
+
+* `foto` se anula (`null`) — una foto es directamente identificable.
+* `cedula_masked` se anula (`null`) — deja de mostrarse la cédula parcial en
+  claro. `cedula_hmac` **no** se toca: sigue siendo un hash, no identifica
+  por sí solo, y Stage 1 lo necesita para matching.
+* `last_known_location` se acota a nivel estado (`"Municipio, Estado"` →
+  `"Estado"`) para no facilitar la localización exacta de un menor.
+
+`EncuentralosParser` deriva `is_minor` automáticamente cuando la fuente
+reporta `edad` (`edad < 18` → `true`); si la fuente no reporta edad,
+`is_minor` queda en `None`. Cualquier parser futuro que reciba una edad
+puntual o un `age_range` debe derivar `is_minor` de la misma forma.
+
+Pendiente para Stage 1 (#81): `person_sources` (tabla/modelo todavía no
+implementado en este repo) debe heredar/propagar la misma protección — un
+`PersonSource` corroborando un `Person` con `is_minor=true` no debe exponer
+más detalle del que expone el `Person` protegido.
+
+---
+
 ## 7. Normalizer
 
 El normalizer convierte datos heterogéneos en formatos estables.
@@ -915,6 +948,25 @@ Responsabilidades de DB/API:
 * Permitir actualizaciones sin destruir historial.
 
 DB/API no debe asumir que un registro está verificado solo porque fue ingerido correctamente.
+
+---
+
+## Conversión de `trust_tier`
+
+Los modelos tipados (`Person`, `Event`, `AcopioCenter`) usan `trust_tier: str` con valores `A/B/C/D` por legibilidad en configs y código de parsers.
+
+La tabla `person_sources` persiste el trust tier como `SMALLINT` (`1/2/3`). Ningún módulo del pipeline hace esa conversión hoy — la implementa Stage 1 (#81) al momento de escribir `person_sources`.
+
+Mapeo canónico:
+
+```text
+A → 1   (fuente oficial)
+B → 2   (ONG verificada)
+C → 2   (ONG no verificada)
+D → 3   (redes sociales, anónimo)
+```
+
+Este mapeo es la única fuente de verdad para esa conversión — cualquier implementación de Stage 1 debe usar exactamente estos valores en vez de inventar una escala propia.
 
 ---
 

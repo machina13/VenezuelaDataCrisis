@@ -205,7 +205,18 @@ Si no se conoce ubicación:
 "last_known_location": null
 ```
 
-### 7.5 Ejemplo
+### 7.5 Protección de menores (`is_minor`)
+
+Si `is_minor=true`, antes de exportar este archivo se reduce información
+identificable (ver `docs/pipeline.md`, sección "Protección de menores"):
+
+* `foto` viaja como `null`.
+* `cedula_masked` viaja como `null` (`cedula_hmac` se conserva).
+* `last_known_location` se acota a nivel estado.
+
+`is_minor=null`/`false` no activa esta reducción.
+
+### 7.6 Ejemplo
 
 ```json
 {
