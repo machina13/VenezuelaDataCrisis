@@ -86,6 +86,14 @@ def _validate_optional_fields(source: dict, label: str) -> None:
                 f"total de intentos; 0 dejaria el adapter sin ningun intento)."
             )
 
+    page_size = source.get("page_size")
+    if page_size is not None:
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
+            raise ValueError(
+                f"{label} debe tener 'page_size' como entero positivo (registros por pagina "
+                f"en fuentes api_json paginadas)."
+            )
+
 
 def validate_sources_config(config_path: Path) -> dict:
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
