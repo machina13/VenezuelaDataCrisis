@@ -82,7 +82,7 @@ _STATUS_MAP: dict[str, str] = {
     "fallecida":     "deceased",
     "muerto":        "deceased",
     "muerta":        "deceased",
-    "sin_informacion": "unknown", 
+    "sin_informacion": "unknown",
 }
 
 
@@ -200,10 +200,17 @@ class EncuentralosParser:
         en Person, se omite y se loguea el id externo.  El resto sigue.
         """
         payload = raw.get("raw_content", {})
-        # La API devuelve {"data": [...], "total": N}
-        # Correccion: la api devuelve { "items": [...]}
+        # La API actual devuelve {"items": [...], "total": N}; "data" queda
+        # como fallback legacy para no romper payloads anteriores.
         if isinstance(payload, dict):
-            records = payload.get("items") or []
+            items = payload.get("items")
+            data = payload.get("data")
+            if isinstance(items, list):
+                records = items
+            elif isinstance(data, list):
+                records = data
+            else:
+                records = []
         elif isinstance(payload, list):
             # Compatibilidad si el adapter entregó la lista directa
             records = payload
@@ -222,8 +229,8 @@ class EncuentralosParser:
                     results.append(person)
             except Exception as exc:
                 log.warning(
-                    "%s: registro malformado omitido: %s",
-                    SOURCE_KEY, exc,
+                    "%s: registro malformado omitido error_type=%s",
+                    SOURCE_KEY, type(exc).__name__,
                 )
 
         log.debug("%s: %d/%d registros parseados", SOURCE_KEY, len(results), len(records))
@@ -241,7 +248,6 @@ class EncuentralosParser:
         No lanza excepción — cualquier fallo de validación Pydantic se
         captura y loguea.
         """
-       
         rec_id = rec.get("id", "?")
 
         # ── full_name ─────────────────────────────────────────────────
@@ -264,8 +270,8 @@ class EncuentralosParser:
                         cedula_hmac = identity_token(raw_cedula_str, self._secret)
                     except Exception as exc:
                         log.warning(
-                            "%s: id=%s error tokenizando cédula: %s",
-                            SOURCE_KEY, rec_id, exc,
+                            "%s: id=%s error tokenizando cédula error_type=%s",
+                            SOURCE_KEY, rec_id, type(exc).__name__,
                         )
 
         # ── ubicación ─────────────────────────────────────────────────
@@ -304,7 +310,6 @@ class EncuentralosParser:
 
         # ── construir Person ──────────────────────────────────────────
         try:
-            
             return Person(
                 full_name=full_name,
                 event_id=self._event_id,
@@ -322,7 +327,7 @@ class EncuentralosParser:
             )
         except Exception as exc:
             log.warning(
-                "%s: id=%s no pudo construirse como Person: %s",
-                SOURCE_KEY, rec_id, exc,
+                "%s: id=%s no pudo construirse como Person error_type=%s",
+                SOURCE_KEY, rec_id, type(exc).__name__,
             )
             return None

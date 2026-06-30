@@ -70,7 +70,7 @@ def _make_raw(payload: Any, source_key: str = SOURCE_KEY) -> RawContent:
         fetched_at="2026-06-24T15:30:00Z",
         http_status=200,
         content_type="application/json",
-        content_hash="abc",
+        content_hash="sha256:abc",
         raw_content=payload,
         page=1,
         total_pages=1,
@@ -102,6 +102,10 @@ class TestParserProtocol:
         raw = _make_raw(_load_fixture())
         result = _parser().parse(raw)
         assert isinstance(result, list)
+
+    def test_raw_content_hash_keeps_sha256_prefix(self) -> None:
+        raw = _make_raw(_load_fixture())
+        assert raw["content_hash"].startswith("sha256:")
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +440,7 @@ class TestNota:
         fixture = _load_fixture()
         raw = _make_raw(fixture)
         p = _parser().parse(raw)[1]
-        
+
         assert p.nota == "[id:1002]"
 
 
@@ -469,6 +473,44 @@ class TestRobustness:
 
     def test_empty_data_list(self) -> None:
         raw = _make_raw({"items": [], "total": 0})
+        assert _parser().parse(raw) == []
+
+    def test_items_wrapper_is_primary(self) -> None:
+        records = [{"id": 5, "nombre": "ITEMS DEMO", "cedula": None, "edad": None,
+                    "estado": "Lara", "municipio": None, "status": "desaparecido",
+                    "observaciones": None, "foto": None, "fecha_reporte": None,
+                    "telefono_contacto": None}]
+        raw = _make_raw({"items": records, "total": 1})
+        result = _parser().parse(raw)
+        assert len(result) == 1
+        assert result[0].full_name == "Items Demo"
+
+    def test_legacy_data_wrapper_still_supported(self) -> None:
+        records = [{"id": 6, "nombre": "DATA LEGACY DEMO", "cedula": None, "edad": None,
+                    "estado": "Lara", "municipio": None, "status": "desaparecido",
+                    "observaciones": None, "foto": None, "fecha_reporte": None,
+                    "telefono_contacto": None}]
+        raw = _make_raw({"data": records, "total": 1})
+        result = _parser().parse(raw)
+        assert len(result) == 1
+        assert result[0].full_name == "Data Legacy Demo"
+
+    def test_items_precedes_legacy_data_when_both_exist(self) -> None:
+        items = [{"id": 7, "nombre": "ITEMS GANADOR", "cedula": None, "edad": None,
+                  "estado": "Lara", "municipio": None, "status": "desaparecido",
+                  "observaciones": None, "foto": None, "fecha_reporte": None,
+                  "telefono_contacto": None}]
+        data = [{"id": 8, "nombre": "DATA FALLBACK", "cedula": None, "edad": None,
+                 "estado": "Lara", "municipio": None, "status": "desaparecido",
+                 "observaciones": None, "foto": None, "fecha_reporte": None,
+                 "telefono_contacto": None}]
+        raw = _make_raw({"items": items, "data": data, "total": 2})
+        result = _parser().parse(raw)
+        assert len(result) == 1
+        assert result[0].full_name == "Items Ganador"
+
+    def test_missing_wrapper_returns_empty_list(self) -> None:
+        raw = _make_raw({"total": 0})
         assert _parser().parse(raw) == []
 
     def test_malformed_raw_content_string(self) -> None:
