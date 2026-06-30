@@ -8,6 +8,16 @@ La configuración de fuentes existe para que el pipeline sepa qué scrapear, có
 
 ## Formato YAML
 
+> ⚠️ El bloque `pagination:` de este ejemplo es **aspiracional, no
+> implementado**. `SourceConfig` (`scrapers/models/source.py`) no tiene
+> campo `pagination` ni `page_size`, y `_get_adapter` en `run_pipeline.py`
+> instancia `ApiAdapter` sin pasarlo — siempre usa el default interno de
+> `api_adapter.py` (`page_size=20`), sin importar lo que digas en el YAML.
+> Si agregás este bloque a una fuente real, el loader lo ignora
+> silenciosamente sin error. Ver `AGENTS.md` §2.1 para el detalle completo
+> y el impacto medido en producción (`encuentralos_tecnosoft`, ~98.830
+> registros con page_size=20 ≈ 4.941 requests).
+
 ```yaml
 project:
   name: "Venezuela Earthquake 2026"
@@ -22,11 +32,12 @@ sources:
     trust_tier: C
     enabled: true
     refresh_minutes: 30
-    pagination:
-      path: /api/personas
-      limit_param: limit
-      offset_param: offset
-      page_size: 20
+    max_concurrent_pages: 4  # opcional; solo aplica si la primera pagina reporta total
+    # pagination:               # NO IMPLEMENTADO — ver advertencia arriba
+    #   path: /api/personas
+    #   limit_param: limit
+    #   offset_param: offset
+    #   page_size: 20
 
   - id: mi_fuente_html
     name: "Hospital Central Barquisimeto"
@@ -52,6 +63,7 @@ sources:
 | `trust_tier` | sí | Letra A/B/C/D — nivel de confianza |
 | `enabled` | sí | `true`/`false`. Las deshabilitadas se ignoran |
 | `refresh_minutes` | no | Frecuencia mínima de scraping. Default: 60 |
+| `max_concurrent_pages` | no | Máximo de páginas API en vuelo cuando la primera respuesta reporta `total`, `count`, `total_count` o `totalCount`. Si se omite, `api_adapter.py` usa un default conservador. Sin total confiable, el adapter conserva paginación secuencial. |
 
 No se deben agregar campos nuevos al contrato sin actualizar este documento.
 
