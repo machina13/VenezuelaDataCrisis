@@ -66,5 +66,6 @@ sources:
     refresh_minutes: 30
     parser_asignado: encuentralos
     required_keywords: []
-    notes: "API paginada (limit/offset, ~107k registros). Usa ApiAdapter con page_size=20."
+    notes: "API paginada (limit/offset, ~107k registros). El adapter auto-detecta el page_size real desde la primera respuesta."
+    max_concurrent_pages: 32
     max_concurrent_posts: 32

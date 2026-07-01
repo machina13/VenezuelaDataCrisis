@@ -334,8 +334,22 @@ class ApiAdapter:
             self._log_unrecognized_schema(first_page.data, page_num=1)
 
         total = first_page.total
-        total_pages = self._total_pages(total)
         first_records = len(first_page.records)
+
+        # Auto-detect the effective page size the API actually honors.
+        # If the API caps our requested limit (e.g. we ask 100, get 20) and
+        # there are more records remaining, use the returned count as step size
+        # for offset calculation — otherwise parallel offsets would skip records.
+        effective_page_size = self.page_size
+        if total is not None and 0 < first_records < self.page_size and first_records < total:
+            effective_page_size = first_records
+            log.info(
+                "%s: API capea limit en %d (pedimos %d) — "
+                "usando effective_page_size=%d para offsets",
+                self.source_key, first_records, self.page_size, effective_page_size,
+            )
+
+        total_pages = self._total_pages(total, effective_page_size)
 
         yield self._raw_content_from_page(
             first_page,
@@ -352,6 +366,7 @@ class ApiAdapter:
             offset=first_page.offset,
             records_in_page=first_records,
             total=total,
+            effective_page_size=effective_page_size,
         ):
             return
 
@@ -359,7 +374,7 @@ class ApiAdapter:
             yield from self._fetch_remaining_sequential(url, extra_params, first_records)
             return
 
-        yield from self._fetch_remaining_parallel(url, extra_params, total, total_pages)
+        yield from self._fetch_remaining_parallel(url, extra_params, total, total_pages, effective_page_size)
 
     def _fetch_page(
         self,
@@ -408,10 +423,11 @@ class ApiAdapter:
             records_in_page=len(page.records),
         )
 
-    def _total_pages(self, total: int | None) -> int | None:
+    def _total_pages(self, total: int | None, page_size: int | None = None) -> int | None:
         if total is None:
             return None
-        return (total + self.page_size - 1) // self.page_size
+        size = page_size if page_size is not None else self.page_size
+        return (total + size - 1) // size
 
     def _is_last_page(
         self,
@@ -419,6 +435,7 @@ class ApiAdapter:
         offset: int,
         records_in_page: int,
         total: int | None,
+        effective_page_size: int | None = None,
     ) -> bool:
         if records_in_page == 0:
             log.info("Paginación completa: página vacía en offset=%d", offset)
@@ -432,11 +449,12 @@ class ApiAdapter:
             )
             return True
 
-        if records_in_page < self.page_size:
+        size = effective_page_size if effective_page_size is not None else self.page_size
+        if records_in_page < size:
             log.info(
                 "Paginación completa: última página parcial "
                 "(%d < %d) en offset=%d",
-                records_in_page, self.page_size, offset,
+                records_in_page, size, offset,
             )
             return True
 
@@ -490,8 +508,9 @@ class ApiAdapter:
         extra_params: dict[str, Any],
         total: int,
         total_pages: int | None,
+        effective_page_size: int,
     ) -> Iterator[RawContent]:
-        offsets = list(range(self.page_size, total, self.page_size))
+        offsets = list(range(effective_page_size, total, effective_page_size))
         results: list[_FetchedPage] = []
 
         failed_offsets: list[int] = []
@@ -528,7 +547,7 @@ class ApiAdapter:
                     self.source_key, page.offset,
                 )
                 continue
-            page_num = (page.offset // self.page_size) + 1
+            page_num = (page.offset // effective_page_size) + 1
             if isinstance(page.data, dict) and page.data and not any(k in page.data for k in _KNOWN_RECORD_KEYS):
                 self._log_unrecognized_schema(page.data, page_num=page_num)
             records_in_page = len(page.records)

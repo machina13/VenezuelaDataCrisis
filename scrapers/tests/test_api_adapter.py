@@ -709,6 +709,75 @@ class TestNoSleepOnLastAttempt:
         assert len(sleep_calls) == 2
 
 
+# ---------------------------------------------------------------------------
+# Tests: auto-detect effective_page_size cuando la API capea el limit
+# ---------------------------------------------------------------------------
+
+class _CapedLimitTransport(httpx.BaseTransport):
+    """Simula una API que ignora limit>cap y siempre devuelve como máximo cap registros."""
+
+    def __init__(self, total: int, cap: int) -> None:
+        self.total = total
+        self.cap = cap
+        self.offsets: list[int] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        offset = int(params.get("offset", 0))
+        self.offsets.append(offset)
+        start = min(offset, self.total)
+        end = min(offset + self.cap, self.total)
+        items = _synthetic_records(end - start, start)
+        return _json_response({"data": items, "total": self.total})
+
+
+class TestEffectivePageSizeAutoDetect:
+    def test_no_records_skipped_when_api_caps_limit(self) -> None:
+        """Si la API capea el limit (pedimos 100, devuelve 20), todos los registros llegan."""
+        total = 50
+        cap = 10
+        transport = _CapedLimitTransport(total=total, cap=cap)
+        adapter = _adapter_with_transport(transport, page_size=100, max_concurrent_pages=4)
+
+        pages = list(adapter.fetch_all("/api/personas"))
+        all_records = [r for p in pages for r in p["raw_content"]["data"]]
+
+        assert len(all_records) == total
+        assert [r["id"] for r in all_records] == list(range(total))
+
+    def test_offsets_step_by_effective_size_not_configured_size(self) -> None:
+        """Los offsets paralelos deben saltar de cap en cap, no de page_size en page_size."""
+        total = 40
+        cap = 10
+        transport = _CapedLimitTransport(total=total, cap=cap)
+        adapter = _adapter_with_transport(transport, page_size=100, max_concurrent_pages=4)
+
+        list(adapter.fetch_all("/api/personas"))
+
+        assert sorted(transport.offsets) == list(range(0, total, cap))
+
+    def test_no_autodetect_when_page_size_matches_actual(self) -> None:
+        """Si la API devuelve page_size registros, no hay auto-detect (comportamiento normal)."""
+        total = 40
+        transport = _PaginatedTransport(total=total, page_size=10)
+        adapter = _adapter_with_transport(transport, page_size=10, max_concurrent_pages=4)
+
+        pages = list(adapter.fetch_all("/api/personas"))
+        all_records = [r for p in pages for r in p["raw_content"]["data"]]
+
+        assert len(all_records) == total
+
+    def test_no_autodetect_on_single_page_dataset(self) -> None:
+        """Si el total cabe en la primera página, partial != cap — no debe confundirlos."""
+        transport = _SinglePageTransport(records=5)
+        adapter = _adapter_with_transport(transport, page_size=20, max_concurrent_pages=4)
+
+        pages = list(adapter.fetch_all("/api/personas"))
+
+        assert len(pages) == 1
+        assert pages[0]["records_in_page"] == 5
+
+
 class TestNoModuleLevelClientLeak:
     def test_import_does_not_create_unclosed_client(self) -> None:
         """
