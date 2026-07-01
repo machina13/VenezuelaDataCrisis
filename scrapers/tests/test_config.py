@@ -240,7 +240,8 @@ def test_encuentralos_parallelism_config_is_loaded():
     )
 
     assert encuentralos.max_concurrent_pages == 32
-    assert encuentralos.max_concurrent_posts == 32
+    assert encuentralos.max_concurrent_posts == 8
+    assert encuentralos.probe_limit == 1000
 
 
 def test_invalid_max_concurrent_posts_is_rejected(tmp_path):
@@ -401,6 +402,22 @@ def test_valid_allowed_domains_and_rate_limit(tmp_path):
     source = payload["sources"][0]
     assert source["allowed_domains"] == ["example.org"]
     assert source["rate_limit_per_minute"] == 30
+
+
+def test_valid_probe_limit(tmp_path):
+    payload = validate_sources_config(_config_with(tmp_path, "    probe_limit: 1000\n"))
+
+    assert payload["sources"][0]["probe_limit"] == 1000
+
+
+def test_zero_probe_limit_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="probe_limit"):
+        validate_sources_config(_config_with(tmp_path, "    probe_limit: 0\n"))
+
+
+def test_bool_probe_limit_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="probe_limit"):
+        validate_sources_config(_config_with(tmp_path, "    probe_limit: true\n"))
 
 
 def test_empty_allowed_domains_is_rejected(tmp_path):
