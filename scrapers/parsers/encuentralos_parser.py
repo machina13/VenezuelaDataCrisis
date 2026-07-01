@@ -20,6 +20,7 @@ edad               age_range  (edad puntual → {"min": N, "max": N})
 edad               is_minor  (True si edad < 18; None si no hay edad)
 foto               foto  (URL o None — sin modificar, el parser no descarga)
 id                 nota  (prefijo "[id:UUID]")
+ultima_vez         (descartado)
 
 Mapeo de status
 ---------------
@@ -95,12 +96,12 @@ def _map_status(raw_status: str | None) -> str:
     return _STATUS_MAP.get(normalized, "unknown")
 
 
-def _mask_cedula(raw: str) -> str:
-    """Devuelve "****XXXX" con los últimos 4 dígitos de la cédula."""
+def _mask_cedula(raw: str) -> str | None:
+    """Devuelve "****XXXX" con los últimos 4 dígitos de la cédula, o None si la cédula es inválida."""
     try:
         return mask_last4(raw)
     except ValueError:
-        return "****????"
+        return None
 
 
 def _location_str(location_obj: dict[str, Any]) -> str | None:
@@ -136,7 +137,7 @@ def _age_range(edad: Any) -> dict[str, int] | None:
 
 
 def _is_pre_masked_cedula(raw: str) -> bool:
-    """Detecta si la cédula ya viene censurada por la API (contiene '•' u otros marcadores de máscara)."""
+    """Detecta '•' (bullet) o '*' (asterisco), los marcadores que esta API usa actualmente."""
     return "•" in raw or "*" in raw
 
 
@@ -202,8 +203,7 @@ class EncuentralosParser:
         en Person, se omite y se loguea el id externo.  El resto sigue.
         """
         payload = raw.get("raw_content", {})
-        # La API devuelve {"data": [...], "total": N}
-        # Correccion: la api devuelve { "items": [...]}
+        # La API devuelve {"items": [...], "total": N}
         if isinstance(payload, dict):
             records = payload.get("items") or []
         elif isinstance(payload, list):
@@ -272,7 +272,8 @@ class EncuentralosParser:
 
         # ── ubicación ─────────────────────────────────────────────────
         # La API ahora entrega ultima_ubicacion como string libre.
-        location_raw: str | None = (rec.get("ultima_ubicacion") or "").strip() or None
+        _ult = rec.get("ultima_ubicacion")
+        location_raw: str | None = _ult.strip() or None if isinstance(_ult, str) else None
 
         last_known_location: str | None = None
         if location_raw:

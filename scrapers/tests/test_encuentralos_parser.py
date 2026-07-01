@@ -197,6 +197,11 @@ class TestFieldMapping:
         assert not hasattr(p, "telefono_contacto")
         assert not hasattr(p, "telefono")
 
+    def test_ultima_vez_not_stored(self) -> None:
+        """ultima_vez debe haberse descartado silenciosamente."""
+        p = self._first()
+        assert not hasattr(p, "ultima_vez")
+
 
 # ---------------------------------------------------------------------------
 # Tests: Status enum
@@ -275,12 +280,13 @@ class TestCedulaHMAC:
             assert p.cedula_masked is None
 
     def test_unmasked_cedula_still_gets_hmac(self) -> None:
-        """Una cédula sin máscara sí genera HMAC (compatibilidad futura)."""
+        """Una cédula sin máscara sí genera HMAC y cedula_masked con formato correcto."""
         records = [_new_schema_record(cedula="V-12345000")]
         raw = _make_raw({"items": records, "total": 1})
         p = _parser().parse(raw)[0]
         assert p.cedula_hmac is not None
         assert _HEX64.match(p.cedula_hmac), f"Not 64-hex: {p.cedula_hmac!r}"
+        assert p.cedula_masked == "****5000"
 
     def test_unmasked_cedula_no_prefix(self) -> None:
         """HMAC de cédula no mascarada: hex puro, sin prefijo hmac_sha256."""
@@ -322,6 +328,27 @@ class TestCedulaHMAC:
     def test_is_pre_masked_helper_clean_cedula(self) -> None:
         assert _is_pre_masked_cedula("V-12345678") is False
         assert _is_pre_masked_cedula("12345000") is False
+
+    def test_cedula_hmac_is_deterministic(self) -> None:
+        """Mismo input → mismo HMAC en dos llamadas consecutivas."""
+        records = [_new_schema_record(cedula="V-12345000")]
+        raw = _make_raw({"items": records, "total": 1})
+        parser = _parser()
+        p1 = parser.parse(raw)[0]
+        p2 = parser.parse(raw)[0]
+        assert p1.cedula_hmac == p2.cedula_hmac
+
+    def test_different_cedulas_different_hmac(self) -> None:
+        """Cédulas distintas → HMACs distintos."""
+        r1 = [_new_schema_record(cedula="V-12345000")]
+        r2 = [_new_schema_record(cedula="V-99999999")]
+        p1 = _parser().parse(_make_raw({"items": r1, "total": 1}))[0]
+        p2 = _parser().parse(_make_raw({"items": r2, "total": 1}))[0]
+        assert p1.cedula_hmac != p2.cedula_hmac
+
+    def test_mask_cedula_bad_input_returns_none(self) -> None:
+        """Cédula inválida → None, no basura "****????"""
+        assert _mask_cedula("123") is None
 
 
 # ---------------------------------------------------------------------------
