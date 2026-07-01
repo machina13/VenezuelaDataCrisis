@@ -6,20 +6,20 @@ Parser concreto para ``encuentralos.tecnosoft.dev``.
 Recibe el ``RawContent`` producido por ``ApiAdapter`` contra
 ``/api/personas?limit=20&offset=N`` y devuelve ``list[Person]``.
 
-Mapeo de campos
----------------
+Mapeo de campos (schema vigente)
+---------------------------------
 API field          → Person field
 -----------------  -----------------------
 nombre             full_name  (normalize_proper_name)
-cedula             cedula_hmac  (identity_token via PII_HMAC_SECRET)
-                   cedula_masked  (últimos 4 dígitos con máscara)
-estado / municipio last_known_location  (normalize_location → str legible)
-status             status  (ver _STATUS_MAP abajo)
-observaciones      nota
+cedula             cedula_hmac = None  (cédula ya viene pre-mascarada; HMAC imposible)
+                   cedula_masked = None
+ultima_ubicacion   last_known_location  (string libre → normalize_location → str legible)
+estado             status  (ver _STATUS_MAP abajo)
+descripcion        nota
 edad               age_range  (edad puntual → {"min": N, "max": N})
 edad               is_minor  (True si edad < 18; None si no hay edad)
 foto               foto  (URL o None — sin modificar, el parser no descarga)
-id                 nota  (prefijo "[id:N]" si hay observaciones)
+id                 nota  (prefijo "[id:UUID]")
 
 Mapeo de status
 ---------------
@@ -31,15 +31,12 @@ herido             injured
 fallecido          deceased
 *cualquier otro*   unknown
 
-Cédula
-------
-Si el campo ``cedula`` está presente y no vacío:
-  - ``cedula_hmac``   = identity_token(cedula, secret)  → 64-hex sin prefijo
-  - ``cedula_masked`` = "****" + últimos 4 dígitos numéricos
-
-El secreto se obtiene de la variable de entorno ``PII_HMAC_SECRET``.
-Si la variable no está, el parser produce ``cedula_hmac=None`` y loguea un
-warning — nunca lanza excepción por un registro individual.
+Cédula pre-mascarada
+---------------------
+La API entrega la cédula censurada (e.g. ``"22•••52"``).
+No es posible calcular el HMAC sobre el valor censurado, por lo que
+``cedula_hmac`` y ``cedula_masked`` quedan permanentemente como ``None``
+para todos los registros de esta fuente.
 
 Nota de seguridad
 -----------------
@@ -138,20 +135,25 @@ def _age_range(edad: Any) -> dict[str, int] | None:
         return None
 
 
+def _is_pre_masked_cedula(raw: str) -> bool:
+    """Detecta si la cédula ya viene censurada por la API (contiene '•' u otros marcadores de máscara)."""
+    return "•" in raw or "*" in raw
+
+
 def _build_nota(record: dict[str, Any]) -> str | None:
     """
-    Combina el id externo y las observaciones en una nota.
+    Combina el id externo y la descripcion en una nota.
 
-    Formato: "[id:1234] Texto de observaciones." o solo el texto.
+    Formato: "[id:UUID] Texto de descripcion." o solo el texto.
     El id se conserva para mantener trazabilidad hacia la fuente original.
     """
     parts: list[str] = []
     rec_id = record.get("id")
     if rec_id is not None:
         parts.append(f"[id:{rec_id}]")
-    obs = (record.get("observaciones") or "").strip()
-    if obs:
-        parts.append(obs)
+    desc = (record.get("descripcion") or "").strip()
+    if desc:
+        parts.append(desc)
     return " ".join(parts) if parts else None
 
 
@@ -251,12 +253,13 @@ class EncuentralosParser:
             return None
 
         # ── cédula → hmac + masked ─────────────────────────────────────
+        # La API entrega la cédula pre-mascarada ("22•••52"); HMAC imposible.
         cedula_hmac: str | None = None
         cedula_masked: str | None = None
         raw_cedula = rec.get("cedula")
         if raw_cedula:
             raw_cedula_str = str(raw_cedula).strip()
-            if raw_cedula_str:
+            if raw_cedula_str and not _is_pre_masked_cedula(raw_cedula_str):
                 cedula_masked = _mask_cedula(raw_cedula_str)
                 if self._secret:
                     try:
@@ -268,18 +271,8 @@ class EncuentralosParser:
                         )
 
         # ── ubicación ─────────────────────────────────────────────────
-        # Combinar estado + municipio en un string para normalize_location
-        raw_estado = (rec.get("estado") or "").strip()
-        raw_municipio = (rec.get("municipio") or "").strip()
-
-        if raw_municipio and raw_estado:
-            location_raw = f"{raw_municipio}, {raw_estado}"
-        elif raw_estado:
-            location_raw = raw_estado
-        elif raw_municipio:
-            location_raw = raw_municipio
-        else:
-            location_raw = None
+        # La API ahora entrega ultima_ubicacion como string libre.
+        location_raw: str | None = (rec.get("ultima_ubicacion") or "").strip() or None
 
         last_known_location: str | None = None
         if location_raw:
@@ -287,7 +280,7 @@ class EncuentralosParser:
             last_known_location = _location_str(loc_obj)
 
         # ── status ────────────────────────────────────────────────────
-        status = _map_status(rec.get("status"))
+        status = _map_status(rec.get("estado"))
 
         # ── edad → age_range / is_minor ─────────────────────────────────
         age_range = _age_range(rec.get("edad"))

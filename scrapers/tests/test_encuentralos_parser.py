@@ -11,11 +11,10 @@ Cobertura
 ---------
 - Mapeo de todos los campos de la API a Person
 - Mapeo completo del enum status (missing/found/injured/deceased/unknown)
-- HMAC de cédula: hex puro 64 chars, sin prefijo, determinista
-- cedula_masked: formato ****XXXX
-- normalize_location aplicado sobre estado/municipio
+- Cédula pre-mascarada: cedula_hmac=None, cedula_masked=None permanente
+- normalize_location aplicado sobre ultima_ubicacion (string libre)
 - age_range desde edad puntual
-- nota con id externo + observaciones
+- nota con id externo (UUID) + descripcion
 - telefono_contacto descartado (PII de tercero)
 - Registro sin nombre → omitido (None), parser no falla
 - Registro sin cédula → cedula_hmac=None, cedula_masked=None
@@ -43,6 +42,7 @@ from scrapers.parsers.encuentralos_parser import (
     _age_range,
     _location_str,
     _build_nota,
+    _is_pre_masked_cedula,
 )
 
 # ---------------------------------------------------------------------------
@@ -52,6 +52,9 @@ from scrapers.parsers.encuentralos_parser import (
 _SECRET = "test-secret-encuentralos"
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "encuentralos_api_sample.json"
 _HEX64 = re.compile(r"\A[0-9a-f]{64}\Z")
+
+_FIXTURE_ID_0 = "a1b2c3d4-0001-0001-0001-000000001001"
+_FIXTURE_ID_1 = "a1b2c3d4-0002-0002-0002-000000001002"
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +88,24 @@ _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
 
 def _parser(secret: str | None = _SECRET) -> EncuentralosParser:
     return EncuentralosParser(event_id=_EVENT_ID, secret=secret)
+
+
+def _new_schema_record(**overrides: Any) -> dict[str, Any]:
+    """Devuelve un registro base con el schema nuevo para usar en tests inline."""
+    base: dict[str, Any] = {
+        "id": "test-uuid-0001",
+        "nombre": "DEMO PERSON",
+        "cedula": None,
+        "edad": None,
+        "ultima_ubicacion": "Zulia",
+        "estado": "desaparecido",
+        "descripcion": None,
+        "foto": None,
+        "ultima_vez": None,
+        "telefono_contacto": None,
+    }
+    base.update(overrides)
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -153,16 +174,16 @@ class TestFieldMapping:
 
     def test_location_is_string(self) -> None:
         p = self._first()
-        # Zulia, Maracaibo → normalize_location → string
+        # ultima_ubicacion="Maracaibo, Zulia" → normalize_location → string
         assert isinstance(p.last_known_location, str)
         assert "Zulia" in p.last_known_location or "Maracaibo" in p.last_known_location
 
     def test_nota_contains_id(self) -> None:
         p = self._first()
         assert p.nota is not None
-        assert "[id:1001]" in p.nota
+        assert f"[id:{_FIXTURE_ID_0}]" in p.nota
 
-    def test_nota_contains_observation(self) -> None:
+    def test_nota_contains_description(self) -> None:
         p = self._first()
         assert "mercado" in p.nota.lower()
 
@@ -173,7 +194,6 @@ class TestFieldMapping:
     def test_telefono_not_stored(self) -> None:
         """telefono_contacto debe haberse descartado silenciosamente."""
         p = self._first()
-        # Person no tiene campo telefono — verificar que el objeto no lo tenga
         assert not hasattr(p, "telefono_contacto")
         assert not hasattr(p, "telefono")
 
@@ -192,27 +212,27 @@ class TestStatusMapping:
 
     def test_desaparecido_maps_to_missing(self) -> None:
         persons = self._parse_all()
-        # registro 0: status="desaparecido"
+        # registro 0: estado="desaparecido"
         assert persons[0].status == "missing"
 
     def test_encontrado_maps_to_found(self) -> None:
         persons = self._parse_all()
-        # registro 1: status="encontrado"
+        # registro 1: estado="encontrado"
         assert persons[1].status == "found"
 
     def test_herido_maps_to_injured(self) -> None:
         persons = self._parse_all()
-        # registro 2: status="herido"
+        # registro 2: estado="herido"
         assert persons[2].status == "injured"
 
     def test_fallecido_maps_to_deceased(self) -> None:
         persons = self._parse_all()
-        # registro 3: status="fallecido"
+        # registro 3: estado="fallecido"
         assert persons[3].status == "deceased"
 
     def test_unknown_status_maps_to_unknown(self) -> None:
         persons = self._parse_all()
-        # registro 4: status="sin_informacion" → desconocido → unknown
+        # registro 4: estado="sin_informacion" → unknown
         assert persons[4].status == "unknown"
 
     def test_none_status_maps_to_unknown(self) -> None:
@@ -237,44 +257,41 @@ class TestStatusMapping:
 # ---------------------------------------------------------------------------
 
 class TestCedulaHMAC:
-    def test_cedula_hmac_is_64_hex(self) -> None:
+    def test_pre_masked_cedula_gives_none_hmac(self) -> None:
+        """Cédula pre-mascarada (contiene '•') → cedula_hmac=None."""
         fixture = _load_fixture()
         raw = _make_raw(fixture)
+        persons = _parser().parse(raw)
+        # Todos los registros del fixture tienen cédulas pre-mascaradas
+        for p in persons:
+            assert p.cedula_hmac is None
+
+    def test_pre_masked_cedula_gives_none_masked(self) -> None:
+        """Cédula pre-mascarada → cedula_masked=None."""
+        fixture = _load_fixture()
+        raw = _make_raw(fixture)
+        persons = _parser().parse(raw)
+        for p in persons:
+            assert p.cedula_masked is None
+
+    def test_unmasked_cedula_still_gets_hmac(self) -> None:
+        """Una cédula sin máscara sí genera HMAC (compatibilidad futura)."""
+        records = [_new_schema_record(cedula="V-12345000")]
+        raw = _make_raw({"items": records, "total": 1})
         p = _parser().parse(raw)[0]
         assert p.cedula_hmac is not None
         assert _HEX64.match(p.cedula_hmac), f"Not 64-hex: {p.cedula_hmac!r}"
 
-    def test_cedula_hmac_no_prefix(self) -> None:
-        fixture = _load_fixture()
-        raw = _make_raw(fixture)
+    def test_unmasked_cedula_no_prefix(self) -> None:
+        """HMAC de cédula no mascarada: hex puro, sin prefijo hmac_sha256."""
+        records = [_new_schema_record(cedula="V-12345000")]
+        raw = _make_raw({"items": records, "total": 1})
         p = _parser().parse(raw)[0]
+        assert p.cedula_hmac is not None
         assert not p.cedula_hmac.startswith("hmac_sha256:")
 
-    def test_cedula_hmac_is_deterministic(self) -> None:
-        fixture = _load_fixture()
-        raw = _make_raw(fixture)
-        p1 = _parser().parse(raw)[0]
-        p2 = _parser().parse(raw)[0]
-        assert p1.cedula_hmac == p2.cedula_hmac
-
-    def test_different_cedulas_different_hmac(self) -> None:
-        fixture = _load_fixture()
-        raw = _make_raw(fixture)
-        persons = _parser().parse(raw)
-        # Los 4 registros con cédula deben tener HMACs distintos
-        hmacs = [p.cedula_hmac for p in persons if p.cedula_hmac is not None]
-        assert len(hmacs) == len(set(hmacs)), "HMACs duplicados detectados"
-
-    def test_cedula_masked_format(self) -> None:
-        fixture = _load_fixture()
-        raw = _make_raw(fixture)
-        p = _parser().parse(raw)[0]
-        # "V-12345000" → "****5000"
-        assert p.cedula_masked is not None
-        assert p.cedula_masked.startswith("****")
-        assert len(p.cedula_masked) == 8
-
     def test_no_cedula_gives_none(self) -> None:
+        """cedula=None → cedula_hmac=None y cedula_masked=None."""
         fixture = _load_fixture()
         raw = _make_raw(fixture)
         persons = _parser().parse(raw)
@@ -284,17 +301,27 @@ class TestCedulaHMAC:
 
     def test_no_secret_gives_none_hmac(self) -> None:
         """Sin PII_HMAC_SECRET, cedula_hmac debe ser None (no lanzar)."""
-        fixture = _load_fixture()
-        raw = _make_raw(fixture)
+        records = [_new_schema_record(cedula="V-12345000")]
+        raw = _make_raw({"items": records, "total": 1})
         parser_no_secret = EncuentralosParser(event_id=_EVENT_ID, secret=None)
         persons = parser_no_secret.parse(raw)
-        # Ningún registro debe tener cedula_hmac
         assert all(p.cedula_hmac is None for p in persons)
 
     def test_mask_cedula_helper(self) -> None:
         assert _mask_cedula("V-12345678") == "****5678"
         assert _mask_cedula("E-9876543") == "****6543"
         assert _mask_cedula("12345000") == "****5000"
+
+    def test_is_pre_masked_helper_with_bullet(self) -> None:
+        assert _is_pre_masked_cedula("22•••52") is True
+        assert _is_pre_masked_cedula("12•••00") is True
+
+    def test_is_pre_masked_helper_with_asterisk(self) -> None:
+        assert _is_pre_masked_cedula("22***52") is True
+
+    def test_is_pre_masked_helper_clean_cedula(self) -> None:
+        assert _is_pre_masked_cedula("V-12345678") is False
+        assert _is_pre_masked_cedula("12345000") is False
 
 
 # ---------------------------------------------------------------------------
@@ -313,19 +340,7 @@ class TestNameNormalization:
 
     def test_connectors_lowercase(self) -> None:
         """Conectores (de, la, del) van en minúscula excepto si abren."""
-        record = {
-            "id": 9000,
-            "nombre": "MARIA DE LA DEMO",
-            "cedula": None,
-            "edad": None,
-            "estado": "Zulia",
-            "municipio": None,
-            "status": "desaparecido",
-            "observaciones": None,
-            "foto": None,
-            "fecha_reporte": None,
-            "telefono_contacto": None,
-        }
+        record = _new_schema_record(nombre="MARIA DE LA DEMO")
         raw = _make_raw({"items": [record], "total": 1})
         p = _parser().parse(raw)[0]
         assert "de la" in p.full_name
@@ -336,27 +351,27 @@ class TestNameNormalization:
 # ---------------------------------------------------------------------------
 
 class TestLocation:
-    def test_estado_only(self) -> None:
-        """Registro con solo estado → last_known_location no vacío."""
+    def test_ultima_ubicacion_free_string(self) -> None:
+        """ultima_ubicacion como string libre pasa por normalize_location."""
         fixture = _load_fixture()
         raw = _make_raw(fixture)
         persons = _parser().parse(raw)
-        # registro 1: Caracas / None → normalize_location → "Distrito Capital"
+        # registro 1: ultima_ubicacion="Caracas" → normalizado, no None
         assert persons[1].last_known_location is not None
 
-    def test_municipio_and_estado(self) -> None:
-        """Registro con municipio + estado → string que incluye ambos."""
+    def test_municipio_y_estado_en_string_libre(self) -> None:
+        """ultima_ubicacion="Maracaibo, Zulia" → string que incluye ambos."""
         fixture = _load_fixture()
         raw = _make_raw(fixture)
-        p = _parser().parse(raw)[0]  # Maracaibo, Zulia
+        p = _parser().parse(raw)[0]
         assert p.last_known_location is not None
 
     def test_no_location_gives_none(self) -> None:
-        """Registro sin estado ni municipio → last_known_location=None."""
+        """ultima_ubicacion=null → last_known_location=None."""
         fixture = _load_fixture()
         raw = _make_raw(fixture)
         persons = _parser().parse(raw)
-        # registro 4: estado=None, municipio=None
+        # registro 4: ultima_ubicacion=None
         assert persons[4].last_known_location is None
 
     def test_location_str_helper_estado_only(self) -> None:
@@ -398,12 +413,7 @@ class TestAgeRange:
 
     def test_no_edad_en_fixture(self) -> None:
         """Registro con edad=None produce age_range=None."""
-        records = [{
-            "id": 9999, "nombre": "DEMO SIN EDAD", "cedula": None,
-            "edad": None, "estado": "Lara", "municipio": None,
-            "status": "desaparecido", "observaciones": None,
-            "foto": None, "fecha_reporte": None, "telefono_contacto": None,
-        }]
+        records = [_new_schema_record(nombre="DEMO SIN EDAD", edad=None, ultima_ubicacion="Lara")]
         raw = _make_raw({"items": records, "total": 1})
         p = _parser().parse(raw)[0]
         assert p.age_range is None
@@ -414,29 +424,29 @@ class TestAgeRange:
 # ---------------------------------------------------------------------------
 
 class TestNota:
-    def test_nota_with_id_and_obs(self) -> None:
-        rec = {"id": 42, "observaciones": "Fue visto en demo"}
+    def test_nota_with_id_and_desc(self) -> None:
+        rec = {"id": 42, "descripcion": "Fue visto en demo"}
         nota = _build_nota(rec)
         assert nota == "[id:42] Fue visto en demo"
 
     def test_nota_id_only(self) -> None:
-        rec = {"id": 42, "observaciones": None}
+        rec = {"id": 42, "descripcion": None}
         assert _build_nota(rec) == "[id:42]"
 
-    def test_nota_obs_only(self) -> None:
-        rec = {"id": None, "observaciones": "Solo observacion"}
-        assert _build_nota(rec) == "Solo observacion"
+    def test_nota_desc_only(self) -> None:
+        rec = {"id": None, "descripcion": "Solo descripcion"}
+        assert _build_nota(rec) == "Solo descripcion"
 
     def test_nota_empty(self) -> None:
-        rec = {"id": None, "observaciones": None}
+        rec = {"id": None, "descripcion": None}
         assert _build_nota(rec) is None
 
-    def test_no_observaciones_still_has_id(self) -> None:
-        """registro 1: sin observaciones pero tiene id → nota con solo id."""
+    def test_no_descripcion_still_has_id(self) -> None:
+        """registro 1: sin descripcion pero tiene id UUID → nota con solo id."""
         fixture = _load_fixture()
         raw = _make_raw(fixture)
         p = _parser().parse(raw)[1]
-        assert p.nota == "[id:1002]"
+        assert p.nota == f"[id:{_FIXTURE_ID_1}]"
 
 
 # ---------------------------------------------------------------------------
@@ -447,12 +457,8 @@ class TestRobustness:
     def test_missing_nombre_skips_record(self) -> None:
         """Registro sin nombre debe omitirse, los demás deben parsearse."""
         records = [
-            {"id": 1, "nombre": None, "cedula": None, "edad": None, "estado": "Zulia",
-             "municipio": None, "status": "desaparecido", "observaciones": None,
-             "foto": None, "fecha_reporte": None, "telefono_contacto": None},
-            {"id": 2, "nombre": "DEMO VALIDO", "cedula": None, "edad": None, "estado": "Lara",
-             "municipio": None, "status": "encontrado", "observaciones": None,
-             "foto": None, "fecha_reporte": None, "telefono_contacto": None},
+            _new_schema_record(id="r1", nombre=None),
+            _new_schema_record(id="r2", nombre="DEMO VALIDO", estado="encontrado"),
         ]
         raw = _make_raw({"items": records, "total": 2})
         result = _parser().parse(raw)
@@ -460,9 +466,7 @@ class TestRobustness:
         assert result[0].full_name == "Demo Valido"
 
     def test_empty_nombre_skips_record(self) -> None:
-        records = [{"id": 99, "nombre": "   ", "cedula": None, "edad": None, "estado": None,
-                    "municipio": None, "status": None, "observaciones": None,
-                    "foto": None, "fecha_reporte": None, "telefono_contacto": None}]
+        records = [_new_schema_record(id="r99", nombre="   ")]
         raw = _make_raw({"items": records, "total": 1})
         assert _parser().parse(raw) == []
 
@@ -478,27 +482,16 @@ class TestRobustness:
 
     def test_raw_content_as_list(self) -> None:
         """Compatibilidad: raw_content puede ser una lista directa de records."""
-        records = [
-            {"id": 5, "nombre": "LISTA DIRECTA DEMO", "cedula": None, "edad": None,
-             "estado": "Lara", "municipio": None, "status": "desaparecido",
-             "observaciones": None, "foto": None, "fecha_reporte": None,
-             "telefono_contacto": None}
-        ]
+        records = [_new_schema_record(id="r5", nombre="LISTA DIRECTA DEMO")]
         raw = _make_raw(records)
         result = _parser().parse(raw)
         assert len(result) == 1
 
     def test_one_bad_record_does_not_break_others(self) -> None:
-        """Un registro que no puede construirse no debe interrumpir el resto."""
+        """Un registro sin nombre no debe interrumpir el resto."""
         records = [
-            # confianza rota: status inválido para Pydantic (vacío es 'unknown' = válido,
-            # pero full_name vacío sí falla a nivel Pydantic)
-            {"id": 10, "nombre": "", "cedula": None, "edad": None, "estado": "Zulia",
-             "municipio": None, "status": "desaparecido", "observaciones": None,
-             "foto": None, "fecha_reporte": None, "telefono_contacto": None},
-            {"id": 11, "nombre": "DEMO OK", "cedula": None, "edad": None, "estado": "Lara",
-             "municipio": None, "status": "herido", "observaciones": None,
-             "foto": None, "fecha_reporte": None, "telefono_contacto": None},
+            _new_schema_record(id="r10", nombre=""),
+            _new_schema_record(id="r11", nombre="DEMO OK", estado="herido"),
         ]
         raw = _make_raw({"items": records, "total": 2})
         result = _parser().parse(raw)
