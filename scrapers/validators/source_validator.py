@@ -122,6 +122,17 @@ def _validate_optional_fields(source: dict[str, Any], label: str) -> None:
                 f"{label} debe tener 'max_concurrent_pages' como entero positivo."
             )
 
+    max_concurrent_posts = source.get("max_concurrent_posts")
+    if max_concurrent_posts is not None:
+        if (
+            isinstance(max_concurrent_posts, bool)
+            or not isinstance(max_concurrent_posts, int)
+            or max_concurrent_posts < 1
+        ):
+            raise ValueError(
+                f"{label} debe tener 'max_concurrent_posts' como entero positivo."
+            )
+
 
 def validate_sources_config(config_path: Path) -> dict[str, Any]:
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))

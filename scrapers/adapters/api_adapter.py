@@ -334,13 +334,28 @@ class ApiAdapter:
             self._log_unrecognized_schema(first_page.data, page_num=1)
 
         total = first_page.total
-        total_pages = self._total_pages(total)
         first_records = len(first_page.records)
+
+        # Auto-detect the effective page size the API actually honors.
+        # If the API caps our requested limit (e.g. we ask 100, get 20) and
+        # there are more records remaining, use the returned count as step size
+        # for offset calculation — otherwise parallel offsets would skip records.
+        effective_page_size = self.page_size
+        if total is not None and 0 < first_records < self.page_size and first_records < total:
+            effective_page_size = first_records
+            log.info(
+                "%s: API capea limit en %d (pedimos %d) — "
+                "usando effective_page_size=%d para offsets",
+                self.source_key, first_records, self.page_size, effective_page_size,
+            )
+
+        total_pages = self._total_pages(total, effective_page_size)
 
         yield self._raw_content_from_page(
             first_page,
             page_num=1,
             total_pages=total_pages,
+            effective_page_size=effective_page_size,
         )
 
         log.debug(
@@ -352,6 +367,7 @@ class ApiAdapter:
             offset=first_page.offset,
             records_in_page=first_records,
             total=total,
+            effective_page_size=effective_page_size,
         ):
             return
 
@@ -359,16 +375,17 @@ class ApiAdapter:
             yield from self._fetch_remaining_sequential(url, extra_params, first_records)
             return
 
-        yield from self._fetch_remaining_parallel(url, extra_params, total, total_pages)
+        yield from self._fetch_remaining_parallel(url, extra_params, total, total_pages, effective_page_size)
 
     def _fetch_page(
         self,
         url: str,
         extra_params: dict[str, Any],
         offset: int,
+        effective_page_size: int | None = None,
     ) -> _FetchedPage:
         query = {
-            "limit": self.page_size,
+            "limit": effective_page_size if effective_page_size is not None else self.page_size,
             "offset": offset,
             **extra_params,
         }
@@ -392,6 +409,7 @@ class ApiAdapter:
         *,
         page_num: int,
         total_pages: int | None,
+        effective_page_size: int | None = None,
     ) -> RawContent:
         return RawContent(
             source_key=self.source_key,
@@ -404,14 +422,15 @@ class ApiAdapter:
             page=page_num,
             total_pages=total_pages,
             offset=page.offset,
-            limit=self.page_size,
+            limit=effective_page_size if effective_page_size is not None else self.page_size,
             records_in_page=len(page.records),
         )
 
-    def _total_pages(self, total: int | None) -> int | None:
+    def _total_pages(self, total: int | None, page_size: int | None = None) -> int | None:
         if total is None:
             return None
-        return (total + self.page_size - 1) // self.page_size
+        size = page_size if page_size is not None else self.page_size
+        return (total + size - 1) // size
 
     def _is_last_page(
         self,
@@ -419,6 +438,7 @@ class ApiAdapter:
         offset: int,
         records_in_page: int,
         total: int | None,
+        effective_page_size: int | None = None,
     ) -> bool:
         if records_in_page == 0:
             log.info("Paginación completa: página vacía en offset=%d", offset)
@@ -432,11 +452,12 @@ class ApiAdapter:
             )
             return True
 
-        if records_in_page < self.page_size:
+        size = effective_page_size if effective_page_size is not None else self.page_size
+        if records_in_page < size:
             log.info(
                 "Paginación completa: última página parcial "
                 "(%d < %d) en offset=%d",
-                records_in_page, self.page_size, offset,
+                records_in_page, size, offset,
             )
             return True
 
@@ -490,56 +511,60 @@ class ApiAdapter:
         extra_params: dict[str, Any],
         total: int,
         total_pages: int | None,
+        effective_page_size: int,
     ) -> Iterator[RawContent]:
-        offsets = list(range(self.page_size, total, self.page_size))
-        results: list[_FetchedPage] = []
-
+        offsets = list(range(effective_page_size, total, effective_page_size))
+        batch_size = self.max_concurrent_pages * 2
         failed_offsets: list[int] = []
+
         with ThreadPoolExecutor(max_workers=self.max_concurrent_pages) as executor:
-            futures = {
-                executor.submit(self._fetch_page, url, extra_params, offset): offset
-                for offset in offsets
-            }
-            for future in as_completed(futures):
-                offset = futures[future]
-                try:
-                    results.append(future.result())
-                except Exception as exc:
-                    log.warning(
-                        "%s: página offset=%d omitida error_type=%s",
-                        self.source_key, offset, type(exc).__name__,
+            for batch_start in range(0, len(offsets), batch_size):
+                batch_offsets = offsets[batch_start:batch_start + batch_size]
+                futures = {
+                    executor.submit(
+                        self._fetch_page, url, extra_params, offset, effective_page_size
+                    ): offset
+                    for offset in batch_offsets
+                }
+                batch_results: list[_FetchedPage] = []
+                for future in as_completed(futures):
+                    offset = futures[future]
+                    try:
+                        batch_results.append(future.result())
+                    except Exception as exc:
+                        log.warning(
+                            "%s: página offset=%d omitida error_type=%s",
+                            self.source_key, offset, type(exc).__name__,
+                        )
+                        failed_offsets.append(offset)
+
+                for page in sorted(batch_results, key=lambda item: item.offset):
+                    if not page.records:
+                        log.info(
+                            "%s: página offset=%d vacía ignorada (total sobreestimado?)",
+                            self.source_key, page.offset,
+                        )
+                        continue
+                    page_num = (page.offset // effective_page_size) + 1
+                    if isinstance(page.data, dict) and page.data and not any(k in page.data for k in _KNOWN_RECORD_KEYS):
+                        self._log_unrecognized_schema(page.data, page_num=page_num)
+                    records_in_page = len(page.records)
+                    yield self._raw_content_from_page(
+                        page,
+                        page_num=page_num,
+                        total_pages=total_pages,
+                        effective_page_size=effective_page_size,
                     )
-                    failed_offsets.append(offset)
+                    log.debug(
+                        "Página %d — offset=%d, registros=%d, total=%s",
+                        page_num, page.offset, records_in_page, total,
+                    )
 
         if failed_offsets:
             log.error(
                 "%s: %d página(s) perdidas tras agotar reintentos — "
                 "offsets=%s — el dataset está incompleto.",
                 self.source_key, len(failed_offsets), failed_offsets,
-            )
-
-        # Acumula todas las páginas en memoria para ordenarlas por offset.
-        # Aceptable porque el pipeline actual ya acumula antes de exportar.
-        # Si fetch_all se consume en streaming real, reemplazar por un heap de prioridad.
-        for page in sorted(results, key=lambda item: item.offset):
-            if not page.records:
-                log.info(
-                    "%s: página offset=%d vacía ignorada (total sobreestimado?)",
-                    self.source_key, page.offset,
-                )
-                continue
-            page_num = (page.offset // self.page_size) + 1
-            if isinstance(page.data, dict) and page.data and not any(k in page.data for k in _KNOWN_RECORD_KEYS):
-                self._log_unrecognized_schema(page.data, page_num=page_num)
-            records_in_page = len(page.records)
-            yield self._raw_content_from_page(
-                page,
-                page_num=page_num,
-                total_pages=total_pages,
-            )
-            log.debug(
-                "Página %d — offset=%d, registros=%d, total=%s",
-                page_num, page.offset, records_in_page, total,
             )
 
     def _log_unrecognized_schema(self, data: dict[str, Any], *, page_num: int) -> None:

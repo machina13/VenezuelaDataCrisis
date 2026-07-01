@@ -389,16 +389,15 @@ class StagingExporter:
                     result.duplicates += 1
             else:
                 log.warning(
-                    "POST %s status=%s externalId=%s body=%r",
+                    "POST %s status=%s externalId=%s",
                     _APORTES_PATH,
                     resp.status_code,
                     payload["externalId"],
-                    resp.text[:500],
                 )
                 with _lock:
                     result.errors.append(
                         f"{_APORTES_PATH} status {resp.status_code} "
-                        f"para externalId={payload['externalId']}: {resp.text[:200]}"
+                        f"para externalId={payload['externalId']}"
                     )
 
         _lock = threading.Lock()

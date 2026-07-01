@@ -58,7 +58,7 @@ class _RecordingTransport(httpx.BaseTransport):
         return httpx.Response(404)
 
 
-def _exporter(transport: _RecordingTransport) -> StagingExporter:
+def _exporter(transport: httpx.BaseTransport) -> StagingExporter:
     cfg = StagingConfig(api_key="k", base_url="https://staging.test")
     client = httpx.Client(base_url="https://staging.test", transport=transport)
     return StagingExporter(cfg, client=client, run_id="run-1")
