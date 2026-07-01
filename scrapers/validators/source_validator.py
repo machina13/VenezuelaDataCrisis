@@ -103,6 +103,14 @@ def _validate_optional_fields(source: dict[str, Any], label: str) -> None:
                 f"en fuentes api_json paginadas)."
             )
 
+    probe_limit = source.get("probe_limit")
+    if probe_limit is not None:
+        if isinstance(probe_limit, bool) or not isinstance(probe_limit, int) or probe_limit < 1:
+            raise ValueError(
+                f"{label} debe tener 'probe_limit' como entero positivo (limite inicial "
+                f"para descubrir el maximo real de fuentes api_json paginadas)."
+            )
+
     allowed_domains = source.get("allowed_domains")
     if allowed_domains is not None:
         if not isinstance(allowed_domains, list) or not allowed_domains or not all(
@@ -128,6 +136,17 @@ def _validate_optional_fields(source: dict[str, Any], label: str) -> None:
         ):
             raise ValueError(
                 f"{label} debe tener 'max_concurrent_pages' como entero positivo."
+            )
+
+    max_concurrent_posts = source.get("max_concurrent_posts")
+    if max_concurrent_posts is not None:
+        if (
+            isinstance(max_concurrent_posts, bool)
+            or not isinstance(max_concurrent_posts, int)
+            or max_concurrent_posts < 1
+        ):
+            raise ValueError(
+                f"{label} debe tener 'max_concurrent_posts' como entero positivo."
             )
 
 

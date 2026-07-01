@@ -113,7 +113,7 @@ def _cmd_ingest(args: argparse.Namespace) -> None:
 
 def _cmd_consolidate(args: argparse.Namespace) -> None:
     from scrapers.dedup.deduplicator import deduplicate_typed_entities
-    from scrapers.models import Event
+    from scrapers.models import AcopioCenter, Event
 
     output_dir = Path(args.output_dir)
     events_path = output_dir / "events.jsonl"
@@ -133,7 +133,7 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
         print("0 registros para consolidar")
         return
 
-    events: list[Event] = []
+    events: list[Event | AcopioCenter] = []
     for rec in records:
         try:
             events.append(Event(**rec))
