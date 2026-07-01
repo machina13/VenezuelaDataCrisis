@@ -49,7 +49,7 @@ def test_adapter_adds_bearer_auth_and_query(monkeypatch: pytest.MonkeyPatch) -> 
     assert seen_query["tweet.fields"] == ["created_at,lang,public_metrics,entities,geo,author_id"]
     assert len(pages) == 1
     assert pages[0]["records_in_page"] == 1
-    assert pages[0]["content_hash"].startswith("sha256:")
+    assert len(pages[0]["content_hash"]) == 64
 
 
 def test_adapter_paginates_with_next_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
