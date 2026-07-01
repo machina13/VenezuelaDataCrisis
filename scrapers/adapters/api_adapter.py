@@ -355,6 +355,7 @@ class ApiAdapter:
             first_page,
             page_num=1,
             total_pages=total_pages,
+            effective_page_size=effective_page_size,
         )
 
         log.debug(
@@ -381,9 +382,10 @@ class ApiAdapter:
         url: str,
         extra_params: dict[str, Any],
         offset: int,
+        effective_page_size: int | None = None,
     ) -> _FetchedPage:
         query = {
-            "limit": self.page_size,
+            "limit": effective_page_size if effective_page_size is not None else self.page_size,
             "offset": offset,
             **extra_params,
         }
@@ -407,6 +409,7 @@ class ApiAdapter:
         *,
         page_num: int,
         total_pages: int | None,
+        effective_page_size: int | None = None,
     ) -> RawContent:
         return RawContent(
             source_key=self.source_key,
@@ -419,7 +422,7 @@ class ApiAdapter:
             page=page_num,
             total_pages=total_pages,
             offset=page.offset,
-            limit=self.page_size,
+            limit=effective_page_size if effective_page_size is not None else self.page_size,
             records_in_page=len(page.records),
         )
 
@@ -511,54 +514,57 @@ class ApiAdapter:
         effective_page_size: int,
     ) -> Iterator[RawContent]:
         offsets = list(range(effective_page_size, total, effective_page_size))
-        results: list[_FetchedPage] = []
-
+        batch_size = self.max_concurrent_pages * 2
         failed_offsets: list[int] = []
+
         with ThreadPoolExecutor(max_workers=self.max_concurrent_pages) as executor:
-            futures = {
-                executor.submit(self._fetch_page, url, extra_params, offset): offset
-                for offset in offsets
-            }
-            for future in as_completed(futures):
-                offset = futures[future]
-                try:
-                    results.append(future.result())
-                except Exception as exc:
-                    log.warning(
-                        "%s: página offset=%d omitida error_type=%s",
-                        self.source_key, offset, type(exc).__name__,
+            for batch_start in range(0, len(offsets), batch_size):
+                batch_offsets = offsets[batch_start:batch_start + batch_size]
+                futures = {
+                    executor.submit(
+                        self._fetch_page, url, extra_params, offset, effective_page_size
+                    ): offset
+                    for offset in batch_offsets
+                }
+                batch_results: list[_FetchedPage] = []
+                for future in as_completed(futures):
+                    offset = futures[future]
+                    try:
+                        batch_results.append(future.result())
+                    except Exception as exc:
+                        log.warning(
+                            "%s: página offset=%d omitida error_type=%s",
+                            self.source_key, offset, type(exc).__name__,
+                        )
+                        failed_offsets.append(offset)
+
+                for page in sorted(batch_results, key=lambda item: item.offset):
+                    if not page.records:
+                        log.info(
+                            "%s: página offset=%d vacía ignorada (total sobreestimado?)",
+                            self.source_key, page.offset,
+                        )
+                        continue
+                    page_num = (page.offset // effective_page_size) + 1
+                    if isinstance(page.data, dict) and page.data and not any(k in page.data for k in _KNOWN_RECORD_KEYS):
+                        self._log_unrecognized_schema(page.data, page_num=page_num)
+                    records_in_page = len(page.records)
+                    yield self._raw_content_from_page(
+                        page,
+                        page_num=page_num,
+                        total_pages=total_pages,
+                        effective_page_size=effective_page_size,
                     )
-                    failed_offsets.append(offset)
+                    log.debug(
+                        "Página %d — offset=%d, registros=%d, total=%s",
+                        page_num, page.offset, records_in_page, total,
+                    )
 
         if failed_offsets:
             log.error(
                 "%s: %d página(s) perdidas tras agotar reintentos — "
                 "offsets=%s — el dataset está incompleto.",
                 self.source_key, len(failed_offsets), failed_offsets,
-            )
-
-        # Acumula todas las páginas en memoria para ordenarlas por offset.
-        # Aceptable porque el pipeline actual ya acumula antes de exportar.
-        # Si fetch_all se consume en streaming real, reemplazar por un heap de prioridad.
-        for page in sorted(results, key=lambda item: item.offset):
-            if not page.records:
-                log.info(
-                    "%s: página offset=%d vacía ignorada (total sobreestimado?)",
-                    self.source_key, page.offset,
-                )
-                continue
-            page_num = (page.offset // effective_page_size) + 1
-            if isinstance(page.data, dict) and page.data and not any(k in page.data for k in _KNOWN_RECORD_KEYS):
-                self._log_unrecognized_schema(page.data, page_num=page_num)
-            records_in_page = len(page.records)
-            yield self._raw_content_from_page(
-                page,
-                page_num=page_num,
-                total_pages=total_pages,
-            )
-            log.debug(
-                "Página %d — offset=%d, registros=%d, total=%s",
-                page_num, page.offset, records_in_page, total,
             )
 
     def _log_unrecognized_schema(self, data: dict[str, Any], *, page_num: int) -> None:
