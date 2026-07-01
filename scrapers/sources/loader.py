@@ -29,6 +29,7 @@ def load_sources(config_path: Path) -> tuple[dict[str, Any], list[SourceConfig]]
                 max_retries=source.get("max_retries"),
                 page_size=source.get("page_size"),
                 max_concurrent_pages=source.get("max_concurrent_pages"),
+                max_concurrent_posts=source.get("max_concurrent_posts"),
                 allowed_domains=source.get("allowed_domains"),
                 rate_limit_per_minute=source.get("rate_limit_per_minute"),
             )
