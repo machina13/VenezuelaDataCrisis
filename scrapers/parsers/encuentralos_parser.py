@@ -11,8 +11,8 @@ Mapeo de campos (schema vigente)
 API field          → Person field
 -----------------  -----------------------
 nombre             full_name  (normalize_proper_name)
-cedula             cedula_hmac = None  (cédula ya viene pre-mascarada; HMAC imposible)
-                   cedula_masked = None
+cedula             cedula_hmac = None si viene pre-mascarada
+                   cedula_masked = None si viene pre-mascarada
 ultima_ubicacion   last_known_location  (string libre → normalize_location → str legible)
 estado             status  (ver _STATUS_MAP abajo)
 descripcion        nota
@@ -32,12 +32,13 @@ herido             injured
 fallecido          deceased
 *cualquier otro*   unknown
 
-Cédula pre-mascarada
----------------------
+Cédula
+------
 La API entrega la cédula censurada (e.g. ``"22•••52"``).
 No es posible calcular el HMAC sobre el valor censurado, por lo que
-``cedula_hmac`` y ``cedula_masked`` quedan permanentemente como ``None``
-para todos los registros de esta fuente.
+``cedula_hmac`` y ``cedula_masked`` quedan como ``None`` en ese caso.
+Si la fuente volviera a entregar una cédula cruda, se mantiene el flujo HMAC
+existente para no romper compatibilidad.
 
 Nota de seguridad
 -----------------
@@ -55,6 +56,7 @@ from typing import Any
 from scrapers.adapters.base import RawContent
 from scrapers.models import Person
 from scrapers.normalizers import derive_is_minor, normalize_location, normalize_proper_name
+from scrapers.sanitizers.pii_redactor import redact_pii
 from shared.hashing import identity_token
 from shared.helpers import mask_last4
 
@@ -152,9 +154,10 @@ def _build_nota(record: dict[str, Any]) -> str | None:
     rec_id = record.get("id")
     if rec_id is not None:
         parts.append(f"[id:{rec_id}]")
-    desc = (record.get("descripcion") or "").strip()
+    raw_desc = record.get("descripcion")
+    desc = str(raw_desc).strip() if raw_desc is not None else ""
     if desc:
-        parts.append(desc)
+        parts.append(redact_pii(desc))
     return " ".join(parts) if parts else None
 
 
@@ -203,9 +206,12 @@ class EncuentralosParser:
         en Person, se omite y se loguea el id externo.  El resto sigue.
         """
         payload = raw.get("raw_content", {})
-        # La API devuelve {"items": [...], "total": N}
+        # La API vigente devuelve {"items": [...], "total": N}; "data" queda
+        # como fallback legacy para no reintroducir el silent failure anterior.
         if isinstance(payload, dict):
-            records = payload.get("items") or []
+            records = payload.get("items")
+            if records is None:
+                records = payload.get("data", [])
         elif isinstance(payload, list):
             # Compatibilidad si el adapter entregó la lista directa
             records = payload
@@ -216,16 +222,32 @@ class EncuentralosParser:
             )
             return []
 
+        if not isinstance(records, list):
+            log.warning(
+                "%s: records inesperado (tipo %s) — página ignorada",
+                SOURCE_KEY,
+                type(records).__name__,
+            )
+            return []
+
         results: list[Person] = []
         for rec in records:
+            if not isinstance(rec, dict):
+                log.warning(
+                    "%s: registro no-dict omitido (tipo %s)",
+                    SOURCE_KEY,
+                    type(rec).__name__,
+                )
+                continue
             try:
                 person = self._parse_record(rec)
                 if person is not None:
                     results.append(person)
             except Exception as exc:
                 log.warning(
-                    "%s: registro malformado omitido: %s",
-                    SOURCE_KEY, exc,
+                    "%s: registro malformado omitido (error_type=%s)",
+                    SOURCE_KEY,
+                    type(exc).__name__,
                 )
 
         log.debug("%s: %d/%d registros parseados", SOURCE_KEY, len(results), len(records))
@@ -266,14 +288,18 @@ class EncuentralosParser:
                         cedula_hmac = identity_token(raw_cedula_str, self._secret)
                     except Exception as exc:
                         log.warning(
-                            "%s: id=%s error tokenizando cédula: %s",
-                            SOURCE_KEY, rec_id, exc,
+                            "%s: id=%s error tokenizando cédula (error_type=%s)",
+                            SOURCE_KEY,
+                            rec_id,
+                            type(exc).__name__,
                         )
 
         # ── ubicación ─────────────────────────────────────────────────
         # La API ahora entrega ultima_ubicacion como string libre.
-        _ult = rec.get("ultima_ubicacion")
-        location_raw: str | None = _ult.strip() or None if isinstance(_ult, str) else None
+        raw_location = rec.get("ultima_ubicacion")
+        location_raw = str(raw_location).strip() if raw_location is not None else None
+        if not location_raw:
+            location_raw = None
 
         last_known_location: str | None = None
         if location_raw:
@@ -314,7 +340,9 @@ class EncuentralosParser:
             )
         except Exception as exc:
             log.warning(
-                "%s: id=%s no pudo construirse como Person: %s",
-                SOURCE_KEY, rec_id, exc,
+                "%s: id=%s no pudo construirse como Person (error_type=%s)",
+                SOURCE_KEY,
+                rec_id,
+                type(exc).__name__,
             )
             return None

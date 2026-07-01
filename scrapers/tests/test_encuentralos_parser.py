@@ -27,6 +27,7 @@ Cobertura
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -475,12 +476,77 @@ class TestNota:
         p = _parser().parse(raw)[1]
         assert p.nota == f"[id:{_FIXTURE_ID_1}]"
 
+    def test_descripcion_redacts_pii_before_note(self) -> None:
+        rec = {
+            "id": "pii-demo-1",
+            "descripcion": "Texto demo con CI V-12345678 y contacto +58 412 123 4567",
+        }
+        nota = _build_nota(rec)
+        assert nota is not None
+        assert "[id:pii-demo-1]" in nota
+        assert "V-12345678" not in nota
+        assert "+58 412 123 4567" not in nota
+        assert "REDACTED" in nota
+
 
 # ---------------------------------------------------------------------------
 # Tests: robustez y tolerancia a errores
 # ---------------------------------------------------------------------------
 
 class TestRobustness:
+    def test_legacy_data_wrapper_is_supported(self) -> None:
+        """Fallback legacy: {"data": [...]} sigue parseando si no hay items."""
+        records = [_new_schema_record(id="legacy-data-1", nombre="DEMO DATA")]
+        raw = _make_raw({"data": records, "total": 1})
+        result = _parser().parse(raw)
+        assert len(result) == 1
+        assert result[0].full_name == "Demo Data"
+
+    def test_items_takes_precedence_over_data(self) -> None:
+        records = [_new_schema_record(id="items-1", nombre="DEMO ITEMS")]
+        legacy_records = [_new_schema_record(id="data-1", nombre="DEMO DATA")]
+        raw = _make_raw({"items": records, "data": legacy_records, "total": 1})
+        result = _parser().parse(raw)
+        assert len(result) == 1
+        assert result[0].full_name == "Demo Items"
+
+    def test_non_list_items_returns_empty(self, caplog: Any) -> None:
+        raw = _make_raw({"items": {"unexpected": "shape"}, "total": 1})
+        with caplog.at_level(logging.WARNING):
+            result = _parser().parse(raw)
+        assert result == []
+        assert "records inesperado" in caplog.text
+        assert "dict" in caplog.text
+        assert "unexpected" not in caplog.text
+
+    def test_non_list_data_returns_empty(self, caplog: Any) -> None:
+        raw = _make_raw({"data": "texto inesperado", "total": 1})
+        with caplog.at_level(logging.WARNING):
+            result = _parser().parse(raw)
+        assert result == []
+        assert "records inesperado" in caplog.text
+        assert "str" in caplog.text
+        assert "texto inesperado" not in caplog.text
+
+    def test_non_dict_record_does_not_break_others(self, caplog: Any) -> None:
+        records = [
+            "registro plano inesperado",
+            _new_schema_record(id="r12", nombre="DEMO OK", estado="herido"),
+        ]
+        raw = _make_raw({"items": records, "total": 2})
+        with caplog.at_level(logging.WARNING):
+            result = _parser().parse(raw)
+        assert len(result) == 1
+        assert result[0].full_name == "Demo Ok"
+        assert "registro no-dict omitido" in caplog.text
+        assert "registro plano inesperado" not in caplog.text
+
+    def test_non_string_ultima_ubicacion_is_tolerated(self) -> None:
+        records = [_new_schema_record(id="r13", nombre="DEMO UBICACION", ultima_ubicacion=12345)]
+        raw = _make_raw({"items": records, "total": 1})
+        result = _parser().parse(raw)
+        assert len(result) == 1
+
     def test_missing_nombre_skips_record(self) -> None:
         """Registro sin nombre debe omitirse, los demás deben parsearse."""
         records = [
