@@ -573,6 +573,8 @@ def _run_source(
         "%s: %d enviados, %d duplicados, %d errores",
         source.id, result.sent, result.duplicates, len(result.errors),
     )
+    for err in result.errors:
+        log.warning("[%s] %s", source.id, err)
     return result
 
 
