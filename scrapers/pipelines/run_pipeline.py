@@ -45,6 +45,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from scrapers.adapters._shared import now_utc, sha256_hex
 from scrapers.adapters.base import RawContent
@@ -103,6 +104,7 @@ def _get_adapter(source: SourceConfig) -> Any:
     stype = source.type
 
     if stype == "api_json":
+        from scrapers.adapters._shared import RateLimiter
         from scrapers.adapters.api_adapter import (
             ApiAdapter,
             _DEFAULT_TIMEOUT,
@@ -128,6 +130,10 @@ def _get_adapter(source: SourceConfig) -> Any:
         # override, ApiAdapter usa su propio default (_DEFAULT_PAGE_SIZE).
         if source.page_size is not None:
             adapter_kwargs["page_size"] = source.page_size
+        # ApiAdapter es el unico que hace multiples requests por corrida
+        # (paginacion), asi que es el unico que aplica rate_limit_per_minute.
+        if source.rate_limit_per_minute is not None:
+            adapter_kwargs["rate_limiter"] = RateLimiter(source.rate_limit_per_minute)
         adapter = ApiAdapter(**adapter_kwargs)
         return adapter
 
@@ -430,6 +436,29 @@ def _apply_minor_protection(
 
 
 # ---------------------------------------------------------------------------
+# Domain allowlist
+# ---------------------------------------------------------------------------
+
+def _check_allowed_domain(source: SourceConfig) -> str | None:
+    """Valida el host de ``source.url`` contra ``source.allowed_domains``.
+
+    Match **exacto, case-insensitive** (sin subdominios — decision del equipo,
+    issue #132). Devuelve ``None`` si pasa (o si no hay allowlist configurada,
+    caso retrocompatible), o un mensaje de error si el host no esta permitido.
+    """
+    if not source.allowed_domains:
+        return None
+    host = (urlparse(source.url).hostname or "").lower()
+    allowed = {domain.strip().lower() for domain in source.allowed_domains}
+    if host not in allowed:
+        return (
+            f"dominio no permitido: {host!r} no esta en allowed_domains "
+            f"{sorted(allowed)} (fuente {source.id} omitida sin fetchear)"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Orquestador por fuente
 # ---------------------------------------------------------------------------
 
@@ -450,6 +479,15 @@ def _run_source(
     """
     log.info("Iniciando fuente: %s (type=%s, parser=%s)", source.id, source.type, source.parser_asignado)
     source_errors: list[str] = []
+
+    # 0. Domain allowlist — antes de construir el adapter, para no abrir ninguna
+    # conexion ni hacer ningun request a un dominio no auditado. La omision queda
+    # visible en summary["errors"], mismo patron que "parser no implementado".
+    domain_error = _check_allowed_domain(source)
+    if domain_error is not None:
+        log.warning("[%s] %s", source.id, domain_error)
+        all_errors.append(f"[{source.id}] {domain_error}")
+        return ExportResult(errors=[domain_error])
 
     # 1. Adapter
     adapter = _get_adapter(source)
