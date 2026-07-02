@@ -25,14 +25,30 @@ sobre un adapter vacio y esta pensada para cablearse a ese adapter cuando exista
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
+import time
+import uuid
 from collections.abc import Callable, Iterable
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from typing import Any
 
+import httpx
+
+from scrapers.dedup.blocking import build_blocks
+from scrapers.dedup.clustering import find_candidates
 from scrapers.dedup import specs
 from scrapers.dedup.fingerprint import FINGERPRINT_VERSION
 from scrapers.jobs.ports import ConsolidationDataPort, FakeInMemoryAdapter, Record
 
 _LOGGER = logging.getLogger(__name__)
+
+_PERSON_ENTITY_TYPE = "person"
+_PERSON_DEFAULT_BATCH_SIZE = 500
+_PERSON_DEFAULT_THRESHOLD = 0.85
+_INITIAL_CURSOR = ("1970-01-01T00:00:00Z", "00000000-0000-0000-0000-000000000000")
 
 # Entity types que este job puede auto-fundir. Se derivan de SPECS para no
 # duplicar la decision de allow_automerge (Person queda fuera por construccion).
@@ -227,6 +243,292 @@ def consolidate_entity_type(
     return summary
 
 
+@dataclass
+class PersonConsolidationConfig:
+    """Configuracion para Person dedup candidates via Supabase REST."""
+
+    supabase_url: str
+    supabase_service_key: str
+    entity_type: str = _PERSON_ENTITY_TYPE
+    batch_size: int = _PERSON_DEFAULT_BATCH_SIZE
+    threshold: float = _PERSON_DEFAULT_THRESHOLD
+
+    @classmethod
+    def from_env(cls, **overrides: Any) -> "PersonConsolidationConfig | None":
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_SERVICE_KEY")
+        if not url or not key:
+            _LOGGER.error("SUPABASE_URL and SUPABASE_SERVICE_KEY are required")
+            return None
+        return cls(
+            supabase_url=str(url).rstrip("/"),
+            supabase_service_key=str(key),
+            entity_type=str(overrides.get("entity_type", _PERSON_ENTITY_TYPE)),
+            batch_size=int(overrides.get("batch_size", _PERSON_DEFAULT_BATCH_SIZE)),
+            threshold=float(overrides.get("threshold", _PERSON_DEFAULT_THRESHOLD)),
+        )
+
+
+@dataclass
+class PersonConsolidationResult:
+    """Resultado agregado de Person dedup candidates."""
+
+    run_id: str
+    entity_type: str
+    batches: int = 0
+    records_read: int = 0
+    blocks: int = 0
+    pairs_compared: int = 0
+    candidates_inserted_or_updated: int = 0
+    duplicates_skipped: int = 0
+    upsert_errors: int = 0
+    mark_errors: int = 0
+    execution_time_ms: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+def _build_person_client(config: PersonConsolidationConfig) -> httpx.Client:
+    """Construye cliente Supabase sin loguear credenciales."""
+    return httpx.Client(
+        base_url=config.supabase_url,
+        headers={
+            "apikey": config.supabase_service_key,
+            "Authorization": f"Bearer {config.supabase_service_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=httpx.Timeout(60.0),
+    )
+
+
+def _fetch_person_batch(
+    client: httpx.Client,
+    config: PersonConsolidationConfig,
+    cursor: tuple[str, str],
+) -> list[dict[str, Any]]:
+    """Lee un batch estable con cursor (created_at, id).
+
+    PostgREST no acepta tuplas SQL directas en query string, asi que se expresa
+    como OR equivalente:
+    created_at > last_created_at OR (created_at = last_created_at AND id > last_id)
+    """
+    last_created_at, last_id = cursor
+    response = client.get(
+        "/rest/v1/aportes",
+        params={
+            "select": "*",
+            "consolidated_at": "is.null",
+            "entity_type": f"eq.{config.entity_type}",
+            "or": (
+                f"(created_at.gt.{last_created_at},"
+                f"and(created_at.eq.{last_created_at},id.gt.{last_id}))"
+            ),
+            "order": "created_at.asc,id.asc",
+            "limit": str(config.batch_size),
+        },
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise TypeError("Supabase aportes response must be a list")
+    return payload
+
+
+def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
+    required = (
+        "event_id",
+        "left_person_record_id",
+        "right_person_record_id",
+        "blocking_key",
+        "score",
+        "reasons",
+        "priority",
+    )
+    missing = [key for key in required if not candidate.get(key)]
+    if missing:
+        raise ValueError(f"candidate payload missing required fields: {missing}")
+    return {
+        "event_id": candidate["event_id"],
+        "left_person_record_id": candidate["left_person_record_id"],
+        "right_person_record_id": candidate["right_person_record_id"],
+        "blocking_key": candidate["blocking_key"],
+        "score": candidate["score"],
+        "reasons": candidate["reasons"],
+        "priority": candidate["priority"],
+        "decision": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _find_existing_candidate(
+    client: httpx.Client,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Busca una fila existente por par canonico + blocking_key.
+
+    El indice unico de master es expresivo (LEAST/GREATEST), por lo que
+    PostgREST no puede apuntarlo con on_conflict de forma portable. Esta
+    estrategia select-before-write mantiene idempotencia sin simular upsert.
+    """
+    left = str(payload["left_person_record_id"])
+    right = str(payload["right_person_record_id"])
+    blocking_key = str(payload["blocking_key"])
+    response = client.get(
+        "/rest/v1/dedup_candidates",
+        params={
+            "select": "candidate_id",
+            "left_person_record_id": f"in.({left},{right})",
+            "right_person_record_id": f"in.({left},{right})",
+            "blocking_key": f"eq.{blocking_key}",
+            "limit": "1",
+        },
+    )
+    response.raise_for_status()
+    rows = response.json()
+    if not isinstance(rows, list):
+        raise TypeError("Supabase dedup_candidates response must be a list")
+    return rows[0] if rows else None
+
+
+def _write_person_candidates(
+    client: httpx.Client,
+    candidates: list[dict[str, Any]],
+) -> tuple[int, int, int, list[str]]:
+    """Insert/update candidates, returning inserted_or_updated, duplicates, errors."""
+    written = 0
+    idempotent = 0
+    errors = 0
+    messages: list[str] = []
+
+    for candidate in candidates:
+        try:
+            payload = _candidate_payload(candidate)
+            existing = _find_existing_candidate(client, payload)
+            was_existing = existing is not None
+            if existing:
+                candidate_id = existing.get("candidate_id")
+                if not candidate_id:
+                    raise ValueError("existing candidate missing candidate_id")
+                response = client.patch(
+                    f"/rest/v1/dedup_candidates?candidate_id=eq.{candidate_id}",
+                    json={
+                        "score": payload["score"],
+                        "reasons": payload["reasons"],
+                        "priority": payload["priority"],
+                        "decision": "pending",
+                    },
+                    headers={"Prefer": "return=minimal"},
+                )
+            else:
+                response = client.post(
+                    "/rest/v1/dedup_candidates",
+                    json=payload,
+                    headers={"Prefer": "return=minimal"},
+                )
+            if response.status_code not in (200, 201, 204):
+                raise httpx.HTTPStatusError(
+                    f"dedup_candidates write failed: {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+            written += 1
+            if was_existing:
+                idempotent += 1
+        except Exception as exc:
+            errors += 1
+            messages.append(f"upsert_error: {exc}")
+            _LOGGER.error("Error writing dedup candidate: %s", exc)
+
+    return written, idempotent, errors, messages
+
+
+def _mark_person_consolidated(client: httpx.Client, record_ids: list[str]) -> tuple[int, int, list[str]]:
+    if not record_ids:
+        return (0, 0, [])
+
+    marked = 0
+    errors = 0
+    messages: list[str] = []
+    now = datetime.now(timezone.utc).isoformat()
+    for i in range(0, len(record_ids), 100):
+        chunk = record_ids[i : i + 100]
+        response = client.patch(
+            f"/rest/v1/aportes?id=in.({','.join(chunk)})",
+            json={"consolidated_at": now},
+            headers={"Prefer": "return=minimal"},
+        )
+        if response.status_code in (200, 204):
+            marked += len(chunk)
+            continue
+        errors += 1
+        message = f"mark_error: status={response.status_code}"
+        messages.append(message)
+        _LOGGER.error("Error marking aportes consolidated: %s", response.status_code)
+    return (marked, errors, messages)
+
+
+def run_person_consolidation(
+    config: PersonConsolidationConfig,
+    client: httpx.Client | None = None,
+) -> PersonConsolidationResult:
+    """Run Person dedup candidate generation end-to-end."""
+    start_time = time.monotonic()
+    result = PersonConsolidationResult(run_id=str(uuid.uuid4()), entity_type=config.entity_type)
+    http_client = client if client is not None else _build_person_client(config)
+    cursor = _INITIAL_CURSOR
+
+    while True:
+        try:
+            rows = _fetch_person_batch(http_client, config, cursor)
+        except Exception as exc:
+            result.errors.append(f"fetch_error: {exc}")
+            break
+
+        if not rows:
+            break
+
+        result.batches += 1
+        result.records_read += len(rows)
+
+        blocks = build_blocks(rows)
+        result.blocks += len(blocks)
+        for members in blocks.values():
+            n = len(members)
+            if n >= 2:
+                result.pairs_compared += n * (n - 1) // 2
+
+        candidates = find_candidates(blocks, config.threshold)
+        written, duplicates, upsert_errors, upsert_messages = _write_person_candidates(
+            http_client,
+            candidates,
+        )
+        result.candidates_inserted_or_updated += written
+        result.duplicates_skipped += duplicates
+        result.upsert_errors += upsert_errors
+        result.errors.extend(upsert_messages)
+
+        if upsert_errors:
+            break
+
+        ids = [str(row["id"]) for row in rows if row.get("id")]
+        _, mark_errors, mark_messages = _mark_person_consolidated(http_client, ids)
+        result.mark_errors += mark_errors
+        result.errors.extend(mark_messages)
+        if mark_errors:
+            break
+
+        last_row = rows[-1]
+        cursor = (
+            str(last_row.get("created_at", _INITIAL_CURSOR[0])),
+            str(last_row.get("id", _INITIAL_CURSOR[1])),
+        )
+        if len(rows) < config.batch_size:
+            break
+
+    result.execution_time_ms = int((time.monotonic() - start_time) * 1000)
+    print(json.dumps(asdict(result)))
+    return result
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m scrapers.jobs.consolidation_job",
@@ -238,9 +540,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--entity-type",
-        choices=list(AUTOMERGE_ENTITY_TYPES),
+        choices=[*AUTOMERGE_ENTITY_TYPES, _PERSON_ENTITY_TYPE],
         default="Event",
-        help="Tipo de entidad a consolidar (solo tipos con auto-merge).",
+        help="Tipo de entidad a consolidar.",
     )
     parser.add_argument(
         "--batch-size",
@@ -251,7 +553,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=1.0,
+        default=None,
         help=(
             "Umbral de similitud [0..1]. Para dedup EXACTO (fingerprint v1) el "
             "unico valor con sentido es 1.0; se acepta como parametro para "
@@ -291,13 +593,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.batch_size <= 0:
         _LOGGER.error("--batch-size debe ser > 0 (recibido: %d)", args.batch_size)
         return 2
-    if not 0.0 <= args.threshold <= 1.0:
+    threshold = (
+        _PERSON_DEFAULT_THRESHOLD
+        if args.entity_type == _PERSON_ENTITY_TYPE and args.threshold is None
+        else 1.0 if args.threshold is None else float(args.threshold)
+    )
+    if not 0.0 <= threshold <= 1.0:
         _LOGGER.error("--threshold debe estar en [0..1] (recibido: %s)", args.threshold)
         return 2
-    if args.threshold != 1.0:
+    if args.entity_type == _PERSON_ENTITY_TYPE:
+        config = PersonConsolidationConfig.from_env(
+            entity_type=args.entity_type,
+            batch_size=args.batch_size,
+            threshold=threshold,
+        )
+        if config is None:
+            return 2
+        result = run_person_consolidation(config)
+        return 1 if result.errors else 0
+
+    if threshold != 1.0:
         _LOGGER.warning(
             "--threshold=%s ignorado: #91 solo hace dedup EXACTO (threshold=1.0)",
-            args.threshold,
+            threshold,
         )
 
     port = _build_port()
