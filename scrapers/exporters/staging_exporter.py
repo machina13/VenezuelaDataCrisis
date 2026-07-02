@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_WATERMARK = "1970-01-01T00:00:00Z"
 _APORTES_PATH = "/api/aportes"
+_APORTES_BULK_PATH = "/api/aportes/bulk"
 _WATERMARKS_PATH = "/api/source-watermarks"
 
 # fetched_at es el wall-clock local de cuando el adapter termino de
@@ -408,6 +409,79 @@ class StagingExporter:
 
         # El watermark solo avanza si no hubo NINGUN error: ni de POST/PUT ni
         # previo de la fuente (source_errors).
+        has_source_errors = bool(source_errors)
+        if not result.errors and not has_source_errors and source_fetched_ats:
+            new_watermark = _apply_safety_margin(max(source_fetched_ats))
+            try:
+                if not self._set_watermark(source_slug, new_watermark):
+                    result.errors.append("no se pudo actualizar el watermark")
+            except httpx.HTTPError as exc:
+                result.errors.append(f"PUT {_WATERMARKS_PATH} fallo: {exc}")
+
+        return result
+
+    def export_source_bulk(
+        self,
+        records: list[dict[str, object]],
+        *,
+        source_slug: str,
+        source_fetched_ats: list[str],
+        bulk_size: int,
+        source_errors: list[str] | None = None,
+    ) -> ExportResult:
+        """Exporta los records en lotes de ``bulk_size`` vía POST /api/aportes/bulk.
+
+        Reduce N POSTs individuales a ceil(N/bulk_size) requests.
+        Usado cuando ``source.bulk_size`` está configurado en el YAML.
+        """
+        result = ExportResult()
+
+        if not self.enabled or self._client is None or self.config is None:
+            for rec in records:
+                payload = self._build_payload(rec, source_slug)
+                log.info(
+                    "DRY-RUN staging_exporter bulk: enviaria entityType=%s externalId=%s",
+                    payload["entityType"],
+                    payload["externalId"],
+                )
+            return result
+
+        payloads = [self._build_payload(rec, source_slug) for rec in records]
+        chunks = [payloads[i : i + bulk_size] for i in range(0, len(payloads), bulk_size)]
+
+        for chunk in chunks:
+            body: dict[str, object] = {"aportes": chunk}
+            try:
+                resp = self._post_with_retry(_APORTES_BULK_PATH, body)
+            except httpx.HTTPError as exc:
+                result.errors.append(f"POST {_APORTES_BULK_PATH} fallo: {exc}")
+                continue
+            except Exception as exc:
+                result.errors.append(f"POST {_APORTES_BULK_PATH} error inesperado: {exc}")
+                continue
+
+            if resp.status_code in (200, 201):
+                try:
+                    data = resp.json()
+                    result.sent += int(data.get("sent", 0))
+                    result.duplicates += int(data.get("duplicates", 0))
+                    batch_errors = data.get("errors") or []
+                    result.errors.extend(str(e) for e in batch_errors)
+                except (ValueError, AttributeError, TypeError) as exc:
+                    result.sent += len(chunk)
+                    log.warning("bulk response JSON invalido: %s", exc)
+            else:
+                log.warning(
+                    "POST %s status=%s body=%s",
+                    _APORTES_BULK_PATH,
+                    resp.status_code,
+                    resp.text[:300],
+                )
+                result.errors.append(
+                    f"{_APORTES_BULK_PATH} status {resp.status_code} "
+                    f"(lote de {len(chunk)} aportes)"
+                )
+
         has_source_errors = bool(source_errors)
         if not result.errors and not has_source_errors and source_fetched_ats:
             new_watermark = _apply_safety_margin(max(source_fetched_ats))

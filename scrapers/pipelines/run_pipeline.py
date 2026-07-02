@@ -755,13 +755,22 @@ def _run_source(
     # 9. Staging export
     # source_errors se pasa para que el watermark NO avance si hubo errores
     # previos de la fuente (parse/PII/enriquecimiento/proteccion de menores).
-    result = exporter.export_source(
-        records,
-        source_slug=source.id,
-        source_fetched_ats=fetched_ats,
-        source_errors=source_errors,
-        max_concurrent_posts=source.max_concurrent_posts,
-    )
+    if source.bulk_size is not None:
+        result = exporter.export_source_bulk(
+            records,
+            source_slug=source.id,
+            source_fetched_ats=fetched_ats,
+            source_errors=source_errors,
+            bulk_size=source.bulk_size,
+        )
+    else:
+        result = exporter.export_source(
+            records,
+            source_slug=source.id,
+            source_fetched_ats=fetched_ats,
+            source_errors=source_errors,
+            max_concurrent_posts=source.max_concurrent_posts,
+        )
     # Arrastrar los errores previos de la fuente al frente del resultado.
     result.errors[0:0] = source_errors
 

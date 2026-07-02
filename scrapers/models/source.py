@@ -27,6 +27,10 @@ class SourceConfig:
     # Tope de requests por ventana de 60s. Solo lo aplica ApiAdapter (paginacion);
     # None/ausente = sin limite. Ver scrapers/adapters/_shared.RateLimiter.
     rate_limit_per_minute: int | None = None
+    # Cuántos aportes enviar por request a /api/aportes/bulk. Si está seteado,
+    # export_source_bulk() reemplaza el loop individual de export_source().
+    # None/ausente = comportamiento original (un POST por registro).
+    bulk_size: int | None = None
 
     @property
     def parser(self) -> str:

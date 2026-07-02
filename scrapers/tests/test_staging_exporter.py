@@ -32,18 +32,35 @@ _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
 
 
 class _RecordingTransport(httpx.BaseTransport):
-    """Captura POSTs a /api/aportes y PUTs a /api/source-watermarks/{slug}."""
+    """Captura POSTs a /api/aportes y /api/aportes/bulk y PUTs a /api/source-watermarks/{slug}."""
 
-    def __init__(self, aportes_status: int = 201, watermark_status: int = 200) -> None:
+    def __init__(
+        self,
+        aportes_status: int = 201,
+        watermark_status: int = 200,
+        bulk_status: int = 200,
+    ) -> None:
         self.aportes_status = aportes_status
         self.watermark_status = watermark_status
+        self.bulk_status = bulk_status
         self.posts: list[dict[str, Any]] = []
+        self.bulk_posts: list[dict[str, Any]] = []
         # source_slug se infiere del path (no va en el body del PUT real).
         self.watermark_puts: list[dict[str, Any]] = []
         self.watermark_gets: list[str] = []
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path == "/api/aportes/bulk":
+            body = json.loads(request.content)
+            self.bulk_posts.append(body)
+            aportes_in = body.get("aportes", [])
+            if self.bulk_status in (200, 201):
+                return httpx.Response(
+                    self.bulk_status,
+                    json={"sent": len(aportes_in), "duplicates": 0, "errors": []},
+                )
+            return httpx.Response(self.bulk_status, json={"ok": False})
         if path == "/api/aportes":
             self.posts.append(json.loads(request.content))
             return httpx.Response(self.aportes_status, json={"ok": True})
@@ -591,6 +608,102 @@ class TestDryRun:
             with caplog.at_level("ERROR", logger="scrapers.exporters.staging_exporter"):
                 assert StagingConfig.from_env() is None
         assert any("https" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+
+
+# --- bulk export ------------------------------------------------------------
+
+class TestBulkExport:
+    def test_chunea_records_en_lotes(self) -> None:
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(7)]
+        t = _RecordingTransport()
+        res = _exporter(t).export_source_bulk(
+            records,
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"],
+            bulk_size=3,
+        )
+        assert res.sent == 7
+        assert res.errors == []
+        assert len(t.bulk_posts) == 3  # ceil(7/3) = 3 requests
+        assert len(t.bulk_posts[0]["aportes"]) == 3
+        assert len(t.bulk_posts[1]["aportes"]) == 3
+        assert len(t.bulk_posts[2]["aportes"]) == 1
+
+    def test_avanza_watermark_si_todo_ok(self) -> None:
+        t = _RecordingTransport()
+        _exporter(t).export_source_bulk(
+            [_person("Juan")],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+            bulk_size=500,
+        )
+        assert t.watermark_puts
+        assert t.watermark_puts[-1]["watermarkAt"] == "2026-06-24T15:55:00Z"
+        assert t.watermark_puts[-1]["source_slug"] == "demo"
+
+    def test_error_http_bloquea_watermark(self) -> None:
+        t = _RecordingTransport(bulk_status=500)
+        res = _exporter(t).export_source_bulk(
+            [_person("Juan")],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+            bulk_size=500,
+        )
+        assert res.errors
+        assert t.watermark_puts == []
+
+    def test_source_errors_bloquean_watermark(self) -> None:
+        t = _RecordingTransport()
+        res = _exporter(t).export_source_bulk(
+            [_person("Juan")],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+            bulk_size=500,
+            source_errors=["menor descartado por proteccion fail-closed"],
+        )
+        assert res.sent == 1
+        assert t.watermark_puts == []
+
+    def test_dry_run_no_envia_nada(self) -> None:
+        exp = StagingExporter(None, run_id="run-1")
+        res = exp.export_source_bulk(
+            [_person("Juan")],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+            bulk_size=500,
+        )
+        assert res.sent == 0
+        assert res.errors == []
+
+    def test_payload_individual_igual_al_bulk(self) -> None:
+        """Los payloads en aportes[] deben ser idénticos a los del POST individual."""
+        rec = _person("Juan")
+        t_ind = _RecordingTransport()
+        _exporter(t_ind).export_source(
+            [rec], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
+        )
+        t_bulk = _RecordingTransport()
+        _exporter(t_bulk).export_source_bulk(
+            [rec],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"],
+            bulk_size=500,
+        )
+        assert t_ind.posts[0] == t_bulk.bulk_posts[0]["aportes"][0]
+
+    def test_contadores_correctos_multiples_lotes(self) -> None:
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(10)]
+        t = _RecordingTransport()
+        res = _exporter(t).export_source_bulk(
+            records,
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"],
+            bulk_size=4,
+        )
+        assert res.sent == 10
+        assert res.duplicates == 0
+        assert res.errors == []
+        assert len(t.bulk_posts) == 3  # ceil(10/4) = 3
 
 
 # --- ciclo de vida ----------------------------------------------------------
