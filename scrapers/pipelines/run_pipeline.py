@@ -39,7 +39,7 @@ Summary devuelto
 El dict de retorno tiene las keys que espera ``cli.py``:
   sources_processed   int  — fuentes completadas sin error fatal
   staging_sent        int  — aportes aceptados por staging (200/201)
-  staging_duplicates  int  — aportes ya existentes en staging (409)
+  staging_duplicates  int  — 0 con PostgREST return=minimal; upsert absorbe reenvios
   staging_errors      int  — errores por registro o de watermark
   quarantined         int  — registros enviados a la Quarantine DB
   quarantine_errors   int  — errores al enviar a cuarentena

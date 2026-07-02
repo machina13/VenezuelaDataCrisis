@@ -308,6 +308,88 @@ class TestWatermark:
             "fuente-b": "2026-06-24T19:55:00Z",
         }
 
+    def test_watermark_post_403_blocks_advance_and_logs_sanitized_status(
+        self, caplog: Any
+    ) -> None:
+        class _Transport(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.watermark_posts: list[dict[str, Any]] = []
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/aportes":
+                    return httpx.Response(201, json={})
+                if request.url.path == "/rest/v1/source_watermarks":
+                    self.watermark_posts.append(json.loads(request.content))
+                    return httpx.Response(403, text="policy denied")
+                return httpx.Response(404)
+
+        transport = _Transport()
+        with caplog.at_level("WARNING", logger="scrapers.exporters.staging_exporter"):
+            res = _exporter(transport).export_source(
+                [_person("Persona Sensible")],
+                source_slug="demo",
+                source_fetched_ats=["2026-06-24T16:00:00Z"],
+            )
+
+        assert res.errors == ["no se pudo actualizar el watermark"]
+        assert transport.watermark_posts == [
+            {"slug": "demo", "watermark_at": "2026-06-24T15:55:00Z"}
+        ]
+        log_text = caplog.text
+        assert "watermark status=403" in log_text
+        assert "policy denied" in log_text
+        assert "Persona Sensible" not in log_text
+
+    def test_watermark_post_500_retries_then_succeeds(self) -> None:
+        class _Transport(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.watermark_attempts = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/aportes":
+                    return httpx.Response(201, json={})
+                if request.url.path == "/rest/v1/source_watermarks":
+                    self.watermark_attempts += 1
+                    if self.watermark_attempts == 1:
+                        return httpx.Response(500, text="transient")
+                    return httpx.Response(201, json={})
+                return httpx.Response(404)
+
+        transport = _Transport()
+        with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
+            res = _exporter(transport).export_source(
+                [_person("Juan")],
+                source_slug="demo",
+                source_fetched_ats=["2026-06-24T16:00:00Z"],
+            )
+
+        assert res.errors == []
+        assert transport.watermark_attempts == 2
+
+    def test_watermark_post_persistent_500_blocks_advance(self) -> None:
+        class _Transport(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.watermark_attempts = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/aportes":
+                    return httpx.Response(201, json={})
+                if request.url.path == "/rest/v1/source_watermarks":
+                    self.watermark_attempts += 1
+                    return httpx.Response(500, text="still failing")
+                return httpx.Response(404)
+
+        transport = _Transport()
+        with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
+            res = _exporter(transport).export_source(
+                [_person("Juan")],
+                source_slug="demo",
+                source_fetched_ats=["2026-06-24T16:00:00Z"],
+            )
+
+        assert res.errors == ["no se pudo actualizar el watermark"]
+        assert transport.watermark_attempts == 4
+
 
 # --- margen de seguridad del watermark ---------------------------------------
 

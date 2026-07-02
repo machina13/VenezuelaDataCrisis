@@ -99,7 +99,11 @@ class StagingConfig:
 
 @dataclass
 class ExportResult:
-    """Resultado agregado de exportar los records de una fuente."""
+    """Resultado agregado de exportar los records de una fuente.
+
+    ``duplicates`` queda en 0 con PostgREST ``return=minimal``: el upsert
+    idempotente absorbe reenvios, pero no devuelve conteo por fila.
+    """
 
     sent: int = 0
     duplicates: int = 0
@@ -118,6 +122,11 @@ def _apply_safety_margin(watermark_at: str) -> str:
         log.warning("watermark con formato inesperado, sin margen de seguridad: %s", watermark_at)
         return watermark_at
     return (dt - _WATERMARK_SAFETY_MARGIN).strftime(_FETCHED_AT_FORMAT)
+
+
+def _response_preview(resp: httpx.Response, *, limit: int = 300) -> str:
+    """Preview acotado de respuestas HTTP, sin loguear payloads enviados."""
+    return resp.text[:limit].replace("\n", " ").replace("\r", " ")
 
 
 def compute_external_id(rec: dict[str, object], entity_type: str) -> str:
@@ -223,7 +232,7 @@ class StagingExporter:
             else:
                 log.warning(
                     "get_watermark %s: status %s body=%r",
-                    source_slug, resp.status_code, resp.text[:300],
+                    source_slug, resp.status_code, _response_preview(resp),
                 )
             return _DEFAULT_WATERMARK
         except (httpx.HTTPError, ValueError, AttributeError) as exc:
@@ -234,18 +243,25 @@ class StagingExporter:
                     "respuesta HTTP de %s: status=%s body=%r",
                     source_slug,
                     response.status_code,
-                    response.text[:300],
+                    _response_preview(response),
                 )
             return _DEFAULT_WATERMARK
 
     def _set_watermark(self, source_slug: str, watermark_at: str) -> bool:
-        assert self._client is not None
-        resp = self._client.post(
+        resp = self._post_with_retry(
             _WATERMARKS_PATH,
-            json={"slug": source_slug, "watermark_at": watermark_at},
+            {"slug": source_slug, "watermark_at": watermark_at},
             headers={"Prefer": "resolution=merge-duplicates"},
         )
-        return resp.status_code in (200, 201)
+        if resp.status_code in (200, 201):
+            return True
+        log.warning(
+            "POST %s watermark status=%s body=%s",
+            _WATERMARKS_PATH,
+            resp.status_code,
+            _response_preview(resp),
+        )
+        return False
 
     def _post_with_retry(
         self,
@@ -346,7 +362,7 @@ class StagingExporter:
                     "POST %s status=%s body=%s",
                     _APORTES_PATH,
                     resp.status_code,
-                    resp.text[:300],
+                    _response_preview(resp),
                 )
                 result.errors.append(
                     f"{_APORTES_PATH} status {resp.status_code} "
